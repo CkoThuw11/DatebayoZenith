@@ -1,0 +1,16 @@
+{
+  "name": "source-postgres-debezium",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "tasks.max": "1",
+    "database.hostname": "${file:/config/.env:PG_HOST}",
+    "database.port": "${file:/config/.env:PG_PORT}",
+    "database.user": "${file:/config/.env:PG_USER}",
+    "database.password": "${file:/config/.env:PG_PASSWORD}",
+    "database.dbname": "${file:/config/.env:PG_DB}",
+    "database.server.name": "<FILL_ME_LOGICAL_SERVER_NAME>",
+    "schema.include.list": "<TO_BE_CONFIGURED_COMMA_SEPARATED_SCHEMAS>",
+    "table.include.list": "<TO_BE_CONFIGURED_COMMA_SEPARATED_TABLES>",
+    "plugin.name": "pgoutput"
+  }
+}

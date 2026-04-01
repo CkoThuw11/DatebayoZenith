@@ -1,0 +1,71 @@
+version: '3.8'
+
+services:
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:29093'
+      KAFKA_LISTENERS: 'PLAINTEXT://kafka:29092,CONTROLLER://kafka:29093,EXTERNAL://0.0.0.0:9092'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:29092,EXTERNAL://localhost:9092'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    ports:
+      - "9092:9092"
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.4.0
+    depends_on:
+      - kafka
+    environment:
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: '${KAFKA_BOOTSTRAP_SERVERS}'
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: 'http://0.0.0.0:8081'
+    ports:
+      - "8081:8081"
+
+  kafka-connect:
+    image: confluentinc/cp-kafka-connect:7.4.0
+    depends_on:
+      - kafka
+      - schema-registry
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: "${KAFKA_BOOTSTRAP_SERVERS}"
+      CONNECT_REST_PORT: 8083
+      CONNECT_GROUP_ID: "cdc-connect-group"
+      CONNECT_CONFIG_STORAGE_TOPIC: "cdc-connect-configs"
+      CONNECT_OFFSET_STORAGE_TOPIC: "cdc-connect-offsets"
+      CONNECT_STATUS_STORAGE_TOPIC: "cdc-connect-status"
+      CONNECT_KEY_CONVERTER: "io.confluent.connect.avro.AvroConverter"
+      CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL: "${SCHEMA_REGISTRY_URL}"
+      CONNECT_VALUE_CONVERTER: "io.confluent.connect.avro.AvroConverter"
+      CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: "${SCHEMA_REGISTRY_URL}"
+    ports:
+      - "8083:8083"
+  akhq:
+    image: tchiotludo/akhq
+    environment:
+      AKHQ_CONFIGURATION: |
+        akhq:
+          connections:
+            docker-kafka-server:
+              properties:
+                bootstrap.servers: "${KAFKA_BOOTSTRAP_SERVERS}"
+              schema-registry:
+                url: "${SCHEMA_REGISTRY_URL}"
+    ports:
+      - "8080:8080"
+    depends_on:
+      - kafka
+
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "9000:9000"
+      - "9001:9001"

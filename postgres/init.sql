@@ -1,0 +1,8 @@
+-- Source-owned: Northwind schema initialization script
+-- <TO_BE_CONFIGURED_DDL>
+-- 
+-- Example:
+-- CREATE TABLE customers (
+--   id INTEGER PRIMARY KEY,
+--   name VARCHAR(255)
+-- );
