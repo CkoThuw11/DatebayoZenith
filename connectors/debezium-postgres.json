@@ -3,14 +3,21 @@
   "config": {
     "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
     "tasks.max": "1",
-    "database.hostname": "${file:/config/.env:PG_HOST}",
-    "database.port": "${file:/config/.env:PG_PORT}",
-    "database.user": "${file:/config/.env:PG_USER}",
-    "database.password": "${file:/config/.env:PG_PASSWORD}",
-    "database.dbname": "${file:/config/.env:PG_DB}",
-    "database.server.name": "<FILL_ME_LOGICAL_SERVER_NAME>",
-    "schema.include.list": "<TO_BE_CONFIGURED_COMMA_SEPARATED_SCHEMAS>",
-    "table.include.list": "<TO_BE_CONFIGURED_COMMA_SEPARATED_TABLES>",
-    "plugin.name": "pgoutput"
+    "database.hostname": "postgres-db",
+    "database.port": "5432",
+    "database.user": "postgres",
+    "database.password": "postgres",
+    "database.dbname": "northwind",
+    "database.server.name": "northwind",
+    "plugin.name": "pgoutput",
+    "publication.autocreate.mode": "all_tables",
+    "replica.identity.autoset.values": "public.*:FULL",
+    "schema.include.list": "public",
+    "table.include.list": "public.orders,public.order_details,public.products,public.customers",
+    "key.converter": "io.confluent.connect.avro.AvroConverter",
+    "key.converter.schema.registry.url": "http://schema-registry:8081",
+    "value.converter": "io.confluent.connect.avro.AvroConverter",
+    "value.converter.schema.registry.url": "http://schema-registry:8081",
+    "topic.prefix": "northwind"
   }
 }

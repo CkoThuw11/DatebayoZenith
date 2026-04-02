@@ -3,6 +3,8 @@ version: '3.8'
 services:
   kafka:
     image: confluentinc/cp-kafka:7.4.0
+    hostname: kafka
+    container_name: kafka
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: 'broker,controller'
@@ -22,10 +24,12 @@ services:
 
   schema-registry:
     image: confluentinc/cp-schema-registry:7.4.0
+    hostname: schema-registry
+    container_name: schema-registry
     depends_on:
       - kafka
     environment:
-      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: '${KAFKA_BOOTSTRAP_SERVERS}'
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: 'PLAINTEXT://kafka:29092'
       SCHEMA_REGISTRY_HOST_NAME: schema-registry
       SCHEMA_REGISTRY_LISTENERS: 'http://0.0.0.0:8081'
     ports:
@@ -33,19 +37,13 @@ services:
 
   kafka-connect:
     image: confluentinc/cp-kafka-connect:7.4.0
+    hostname: kafka-connect
+    container_name: kafka-connect
     depends_on:
       - kafka
       - schema-registry
-    command:
-      - bash
-      - -c
-      - |
-        echo "Installing S3 Sink Connector plugin..."
-        confluent-hub install --no-prompt confluentinc/kafka-connect-s3:10.5.7
-        echo "Launching Kafka Connect..."
-        /etc/confluent/docker/run
     environment:
-      CONNECT_BOOTSTRAP_SERVERS: "${KAFKA_BOOTSTRAP_SERVERS}"
+      CONNECT_BOOTSTRAP_SERVERS: 'kafka:29092'
       CONNECT_REST_PORT: 8083
       CONNECT_REST_ADVERTISED_HOST_NAME: "kafka-connect"
       CONNECT_GROUP_ID: "cdc-connect-group"
@@ -56,25 +54,38 @@ services:
       CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
       CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
       CONNECT_KEY_CONVERTER: "io.confluent.connect.avro.AvroConverter"
-      CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL: "${SCHEMA_REGISTRY_URL}"
+      CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
       CONNECT_VALUE_CONVERTER: "io.confluent.connect.avro.AvroConverter"
       CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: "${SCHEMA_REGISTRY_URL}"
       CONNECT_PLUGIN_PATH: "/usr/share/java,/usr/share/confluent-hub-components"
       AWS_ACCESS_KEY_ID: "${MINIO_ROOT_USER}"
       AWS_SECRET_ACCESS_KEY: "${MINIO_ROOT_PASSWORD}"
+    command:
+      - bash
+      - -c
+      - |
+        echo "Installing Debezium PostgreSQL connector..."
+        confluent-hub install --no-prompt debezium/debezium-connector-postgresql:2.4.2
+        echo "Installing S3 Sink connector..."
+        confluent-hub install --no-prompt confluentinc/kafka-connect-s3:10.5.7
+        echo "Connectors installed. Starting Kafka Connect..."
+        /etc/confluent/docker/run
     ports:
       - "8083:8083"
+
   akhq:
     image: tchiotludo/akhq
+    hostname: akhq
+    container_name: akhq
     environment:
       AKHQ_CONFIGURATION: |
         akhq:
           connections:
             docker-kafka-server:
               properties:
-                bootstrap.servers: "${KAFKA_BOOTSTRAP_SERVERS}"
+                bootstrap.servers: "kafka:29092"
               schema-registry:
-                url: "${SCHEMA_REGISTRY_URL}"
+                url: "http://schema-registry:8081"
     ports:
       - "8080:8080"
     depends_on:
@@ -82,6 +93,8 @@ services:
 
   minio:
     image: minio/minio
+    hostname: minio
+    container_name: minio
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
@@ -92,5 +105,27 @@ services:
       - "9000:9000"
       - "9001:9001"
 
+  postgres-db:
+    image: postgres:15
+    hostname: postgres-db
+    container_name: postgres-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: northwind
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"
+      - "-c"
+      - "max_replication_slots=10"
+      - "-c"
+      - "max_wal_senders=10"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
 volumes:
+  postgres_data:
   minio-data:
