@@ -1,7 +1,15 @@
 #!/bin/bash
-# Shared utilities: Pre-create Kafka topics
-# NO business logic here
 
-# KAFKA_BROKER="localhost:9092"
-# echo "Creating <TO_BE_CONFIGURED> topic..."
-# <FILL_ME>
+# Wait for Kafka to be ready
+echo "Waiting for Kafka..."
+while ! kafka-topics --bootstrap-server kafka:29092 --list; do
+  sleep 2
+done
+
+# Create topics
+kafka-topics --create --topic northwind.public.orders --partitions 4 --replication-factor 1 --bootstrap-server kafka:29092
+kafka-topics --create --topic northwind.public.order_details --partitions 4 --replication-factor 1 --bootstrap-server kafka:29092
+kafka-topics --create --topic northwind.public.products --partitions 2 --replication-factor 1 --bootstrap-server kafka:29092
+kafka-topics --create --topic northwind.public.customers --partitions 2 --replication-factor 1 --bootstrap-server kafka:29092
+
+echo "Topics created successfully"
