@@ -2,8 +2,8 @@
   "name": "minio-s3-sink-connector",
   "config": {
     "connector.class": "io.confluent.connect.s3.S3SinkConnector",
-    "tasks.max": "1",
-    "topics": "test_topic",
+    "tasks.max": "2",
+    "topics": "northwind.public.orders,northwind.public.order_details,northwind.public.products,northwind.public.customers",
     "s3.region": "us-east-1",
     "s3.bucket.name": "northwind-data-lake",
     "s3.part.size": "5242880",
