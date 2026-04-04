@@ -14,8 +14,3 @@ This document strictly defines the boundaries and agreements between teams.
 ## 3. MinIO S3 Layout
 - Bucket Name: `northwind-datalake`
 - Path Structure: `/topics/<topic_name>/year=YYYY/month=MM/day=DD/`
-
-## 4. Integration Boundaries
-- The **Source Team** is responsible for writing valid connector configs that align with the defined topic conventions.
-- The **Sink Team** expects exactly these topics to be present in Schema Registry for downstream digestion.
-- The **Backbone Team** guarantees the uptime of `kafka` (9092) and `schema-registry` (8081).
