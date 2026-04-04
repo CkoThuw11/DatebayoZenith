@@ -8,8 +8,6 @@
     "s3.bucket.name": "northwind-data-lake",
     "s3.part.size": "5242880",
     "store.url": "http://minio:9000",
-    "aws.access.key.id": "admin",
-    "aws.secret.access.key": "admin123",
     "format.class": "io.confluent.connect.s3.format.avro.AvroFormat",
     "key.converter": "io.confluent.connect.avro.AvroConverter",
     "key.converter.schema.registry.url": "http://schema-registry:8081",
@@ -21,7 +19,7 @@
     "partition.duration.ms": "86400000",
     "timezone": "UTC",
     "locale": "en-US",
-    "flush.size": "1000",
+    "flush.size": "50",
     "rotate.interval.ms": "60000"
   }
 }
