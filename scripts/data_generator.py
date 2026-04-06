@@ -94,7 +94,7 @@ def generate_order(conn):
 
 if __name__ == '__main__':
     logger.info("Initializing Data Generator...")
-    time.sleep(10) # Initial sleep to allow Postgres to fully start on compose up
+    time.sleep(8) # Initial sleep to allow Postgres to fully start on compose up
     conn = get_connection()
     logger.info("Connected to Database. Starting to generate orders...")
     
