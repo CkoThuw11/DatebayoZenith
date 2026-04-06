@@ -6,124 +6,124 @@
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15-4169E1?logo=postgresql&logoColor=white)
 ![MinIO](https://img.shields.io/badge/MinIO-S3_Compatible-C72E49?logo=minio&logoColor=white)
 
-> **CDC (Change Data Capture) Pipeline** hoàn chỉnh — tự động bắt mọi thay đổi dữ liệu từ PostgreSQL và stream realtime vào MinIO Data Lake thông qua Apache Kafka.
+> **Complete CDC (Change Data Capture) Pipeline** — automatically captures every data change from PostgreSQL and streams it in real-time to a MinIO Data Lake via Apache Kafka.
 
 ---
 
-## 📐 Kiến Trúc Tổng Quan
+## 📐 Architecture Overview
 
-![Kiến trúc CDC Pipeline: PostgreSQL → Debezium → Kafka → Schema Registry → S3 Sink → MinIO](docs/assets/architecture.png)
+![CDC Pipeline Architecture: PostgreSQL → Debezium → Kafka → Schema Registry → S3 Sink → MinIO](docs/assets/architecture.png)
 
-**Luồng dữ liệu**: `PostgreSQL` → `Debezium` → `Kafka` ↔ `Schema Registry` → `S3 Sink` → `MinIO`
+**Data Flow**: `PostgreSQL` → `Debezium` → `Kafka` ↔ `Schema Registry` → `S3 Sink` → `MinIO`
 
 ---
 
-## 📚 Tài Liệu
+## 📚 Documentation
 
-Tất cả tài liệu kỹ thuật nằm trong thư mục `docs/`:
+All technical documentation is located in the `docs/` directory:
 
-| Tài Liệu | Mô Tả |
+| Document | Description |
 |---|---|
-| [📐 Architecture](docs/architecture.md) | Kiến trúc hệ thống, luồng dữ liệu chi tiết, và quyết định thiết kế |
-| [📋 Contracts](docs/contracts.md) | Quy ước đặt tên, Avro schema, S3 layout — cam kết giữa các team |
-| [🔌 Connectors](docs/connectors.md) | Giải thích chi tiết từng field trong cấu hình Kafka Connect |
-| [🚀 Local Setup](docs/local-setup.md) | Hướng dẫn từng bước để chạy pipeline trên máy local |
+| [📐 Architecture](docs/architecture.md) | System architecture, detailed data flow, and design decisions |
+| [📋 Contracts](docs/contracts.md) | Naming conventions, Avro schema, S3 layout — commitments between teams |
+| [🔌 Connectors](docs/connectors.md) | Detailed explanation of each field in the Kafka Connect configuration |
+| [🚀 Local Setup](docs/local-setup.md) | Step-by-step guide to running the pipeline on a local machine |
 
 ---
 
-## 🗂️ Cấu Trúc Repository
+## 🗂️ Repository Structure
 
 ```
 DatebayoZenith/
 │
-├── 📄 README.md                      # Tài liệu tổng quan (file này)
-├── 📄 docker-compose.yaml            # Định nghĩa toàn bộ hạ tầng local
-├── 📄 .env.example                   # Template biến môi trường
-├── 📄 northwind.sql                  # Dữ liệu mẫu Northwind (backup)
+├── 📄 README.md                      # Overview documentation (this file)
+├── 📄 docker-compose.yaml            # Local infrastructure definition
+├── 📄 .env.example                   # Environment variables template
+├── 📄 northwind.sql                  # Northwind sample data (backup)
 │
-├── 📁 docs/                          # Tài liệu kiến trúc & hợp đồng dữ liệu
-│   ├── architecture.md               # Thiết kế hệ thống end-to-end
+├── 📁 docs/                          # Architecture & data contract documentation
+│   ├── architecture.md               # End-to-end system design
 │   ├── contracts.md                  # Data & Infrastructure contracts
-│   ├── connectors.md                 # Hướng dẫn cấu hình connectors
-│   └── local-setup.md                # Hướng dẫn chạy local
+│   ├── connectors.md                 # Connector configuration guide
+│   └── local-setup.md                # Local setup guide
 │
-├── 📁 connectors/                    # Cấu hình Kafka Connect plugins
-│   ├── debezium-postgres.json        # Source connector (CDC từ Postgres)
-│   └── s3-sink-minio-production.json # Sink connector (ghi vào MinIO)
+├── 📁 connectors/                    # Kafka Connect plugin configurations
+│   ├── debezium-postgres.json        # Source connector (CDC from Postgres)
+│   └── s3-sink-minio-production.json # Sink connector (writes to MinIO)
 │
-├── 📁 scripts/                       # Script tiện ích
-│   └── register-connectors.sh        # Đăng ký connectors qua REST API
+├── 📁 scripts/                       # Utility scripts
+│   └── register-connectors.sh        # Register connectors via REST API
 │
-└── 📁 postgres/                      # Khởi tạo database nguồn
-    ├── init.sql                      # Schema Northwind + seed data
-    └── README.md                     # Hướng dẫn cấu hình Postgres CDC
+└── 📁 postgres/                      # Source database initialization
+    ├── init.sql                      # Northwind schema + seed data
+    └── README.md                     # Postgres CDC configuration guide
 ```
 
 ---
 
-## ⚡ Bắt Đầu Nhanh
+## ⚡ Quick Start
 
-### Yêu Cầu Hệ Thống
+### System Requirements
 
-| Công Cụ | Phiên Bản Tối Thiểu |
+| Tool | Minimum Version |
 |---|---|
-| Docker | 24.x trở lên |
-| Docker Compose | 2.x trở lên |
-| curl | Bất kỳ (dùng để đăng ký connectors) |
+| Docker | 24.x or higher |
+| Docker Compose | 2.x or higher |
+| curl | Any (used to register connectors) |
 | Bash | Git Bash / WSL / Linux / macOS |
 
-### Các Bước Khởi Động
+### Startup Steps
 
-**Bước 1 — Chuẩn bị cấu hình môi trường**
+**Step 1 — Prepare environment configuration**
 ```bash
 cp .env.example .env
-# Chỉnh sửa .env nếu cần thay đổi credentials
+# Edit .env if you need to change credentials
 ```
 
-**Bước 2 — Khởi động toàn bộ hạ tầng**
+**Step 2 — Start the entire infrastructure**
 ```bash
 docker-compose up -d
 ```
-> ⏳ Lần đầu chạy sẽ mất 5–10 phút để tải image và cài đặt connector plugins.
+> ⏳ The first run will take 5–10 minutes to download images and install connector plugins.
 
-**Bước 3 — Kiểm tra tất cả container đang chạy**
+**Step 3 — Verify all containers are running**
 ```bash
 docker-compose ps
 ```
-Kết quả mong đợi: tất cả services ở trạng thái `Up`.
+Expected result: all services are in the `Up` state.
 
-**Bước 4 — Đăng ký Kafka Connect Connectors**
+**Step 4 — Register Kafka Connect Connectors**
 ```bash
-# Chạy từ thư mục gốc của project
+# Run from the project root directory
 bash scripts/register-connectors.sh
 ```
 
-**Bước 5 — Truy cập Web UI để kiểm tra**
+**Step 5 — Access Web UIs for verification**
 
-| Giao Diện | URL | Mục Đích |
+| Interface | URL | Purpose |
 |---|---|---|
-| **AKHQ** (Kafka UI) | http://localhost:8080 | Xem topics, messages, consumer groups |
-| **MinIO** (S3 UI) | http://localhost:9001 | Duyệt files trong data lake |
-| **Kafka Connect REST** | http://localhost:8083 | Quản lý connectors qua API |
-| **Schema Registry** | http://localhost:8081 | Xem Avro schemas đã đăng ký |
+| **AKHQ** (Kafka UI) | http://localhost:8080 | View topics, messages, consumer groups |
+| **MinIO** (S3 UI) | http://localhost:9001 | Browse files in the data lake |
+| **Kafka Connect REST** | http://localhost:8083 | Manage connectors via API |
+| **Schema Registry** | http://localhost:8081 | View registered Avro schemas |
 
-> Xem hướng dẫn chi tiết hơn tại [docs/local-setup.md](docs/local-setup.md).
+> See more detailed instructions at [docs/local-setup.md](docs/local-setup.md).
 
 ---
 
-## 🔧 Xử Lý Sự Cố Thường Gặp
+## 🔧 Common Troubleshooting
 
-| Triệu Chứng | Nguyên Nhân | Giải Pháp |
+| Symptom | Cause | Solution |
 |---|---|---|
-| `kafka-connect` restart liên tục | Đang tải connector plugins | Đợi 3–5 phút, plugins cần download |
-| Script báo connection refused | Kafka Connect chưa sẵn sàng | Script tự động đợi — kiên nhẫn chờ |
-| MinIO bucket không tạo được | Credentials không khớp | Kiểm tra `MINIO_ROOT_USER/PASSWORD` trong `.env` |
-| Connector ở trạng thái `FAILED` | Postgres chưa enable logical replication | Kiểm tra `wal_level=logical` trong docker-compose |
+| `kafka-connect` restarts continuously | Downloading connector plugins | Wait 3–5 minutes, plugins need to download |
+| Script reports connection refused | Kafka Connect not ready yet | Script automatically waits — be patient |
+| MinIO bucket cannot be created | Credentials mismatch | Check `MINIO_ROOT_USER/PASSWORD` in `.env` |
+| Connector in `FAILED` state | Postgres logical replication not enabled | Check `wal_level=logical` in docker-compose |
 
 ---
 
-## 📖 Đọc Thêm
+## 📖 Further Reading
 
-- Kiến trúc chi tiết → [docs/architecture.md](docs/architecture.md)
-- Quy ước và data contracts → [docs/contracts.md](docs/contracts.md)
-- Cấu hình connectors → [docs/connectors.md](docs/connectors.md)
+- Detailed Architecture → [docs/architecture.md](docs/architecture.md)
+- Conventions and Data Contracts → [docs/contracts.md](docs/contracts.md)
+- Connector Configuration → [docs/connectors.md](docs/connectors.md)

@@ -130,7 +130,7 @@ services:
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
 
   data-generator:
-    build: ./scripts
+    build: ./generator
     container_name: data-generator
     depends_on:
       - postgres-db

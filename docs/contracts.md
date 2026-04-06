@@ -1,26 +1,26 @@
 # 📋 Data & Infrastructure Contracts
 
-Tài liệu này định nghĩa **ranh giới và cam kết** giữa các team. Mọi thành viên khi làm việc với pipeline đều **phải tuân thủ** các quy ước sau.
+This document defines the **boundaries and commitments** between teams. Every member working with the pipeline **must comply** with the following conventions.
 
-> ⚠️ **Lưu ý**: Bất kỳ thay đổi nào vi phạm các contracts này đều có thể gây **đứt gãy pipeline** hoặc **mất dữ liệu** ở downstream.
+> ⚠️ **Note**: Any changes violating these contracts may cause **pipeline failures** or **downstream data loss**.
 
 ---
 
-## 1. Quy Ước Đặt Tên
+## 1. Naming Conventions
 
 ### Kafka Topics
 
 **Pattern**: `{topic.prefix}.{schema}.{table}`
 
-| Thành Phần | Giá Trị Hiện Tại | Ghi Chú |
+| Component | Current Value | Notes |
 |---|---|---|
-| `topic.prefix` | `northwind` | Tên server DB, cấu hình trong Debezium |
-| `schema` | `public` | Schema PostgreSQL |
-| `table` | tên bảng | Chữ thường, dùng dấu `_` |
+| `topic.prefix` | `northwind` | Database server name, configured in Debezium |
+| `schema` | `public` | PostgreSQL schema |
+| `table` | table name | Lowercase, uses `_` |
 
-**Danh sách topics hiện tại**:
+**List of Current Topics**:
 
-| Topic | Bảng Nguồn |
+| Topic | Source Table |
 |---|---|
 | `northwind.public.orders` | `public.orders` |
 | `northwind.public.order_details` | `public.order_details` |
@@ -33,7 +33,7 @@ Tài liệu này định nghĩa **ranh giới và cam kết** giữa các team. 
 
 **Pattern**: `{type}-{system}-{name}`
 
-| Type | System | Name | Tên Đầy Đủ |
+| Type | System | Name | Full Name |
 |---|---|---|---|
 | `source` | `postgres` | `debezium` | `source-postgres-debezium` |
 | `sink` | `s3` | `minio-connector` | `minio-s3-sink-connector` |
@@ -42,25 +42,25 @@ Tài liệu này định nghĩa **ranh giới và cam kết** giữa các team. 
 
 ### MinIO Buckets
 
-| Bucket | Mục Đích |
+| Bucket | Purpose |
 |---|---|
-| `northwind-data-lake` | Bucket chính chứa toàn bộ CDC data |
+| `northwind-data-lake` | Primary bucket containing all CDC data |
 
 ---
 
-## 2. Cấu Trúc Payload — Avro & Schema Registry
+## 2. Payload Structure — Avro & Schema Registry
 
-### Nguyên Tắc Bắt Buộc
+### Mandatory Principles
 
-- ✅ **Tất cả** messages trên Kafka topics PHẢI được serialize bằng **Avro**
-- ✅ **Key** phải chứa **primary key** của bảng nguồn
-- ✅ **Value** phải giữ nguyên **Debezium envelope** đầy đủ
+- ✅ **All** messages on Kafka topics MUST be serialized using **Avro**
+- ✅ **Keys** MUST contain the **primary key** of the source table
+- ✅ **Values** MUST retain the full **Debezium envelope**
 
 ---
 
-### Debezium Envelope — Cấu Trúc Value
+### Debezium Envelope — Value Structure
 
-Mỗi message value trên Kafka có cấu trúc chuẩn Debezium:
+Each message value on Kafka follows the standard Debezium envelope structure:
 
 ```json
 {
@@ -72,17 +72,17 @@ Mỗi message value trên Kafka có cấu trúc chuẩn Debezium:
 }
 ```
 
-| Trường | Kiểu | Ý Nghĩa |
+| Field | Type | Meaning |
 |---|---|---|
-| `before` | Object \| null | Snapshot dữ liệu **trước** khi thay đổi. `null` với INSERT |
-| `after` | Object \| null | Snapshot dữ liệu **sau** khi thay đổi. `null` với DELETE |
-| `source` | Object | Metadata nguồn: tên DB, tên bảng, LSN của WAL, timestamp |
-| `op` | String | Loại thao tác: `c`=CREATE, `u`=UPDATE, `d`=DELETE, `r`=READ (snapshot) |
-| `ts_ms` | Long | Timestamp (milliseconds) khi Debezium xử lý event |
+| `before` | Object \| null | Snapshot of data **before** the change. `null` for INSERTs |
+| `after` | Object \| null | Snapshot of data **after** the change. `null` for DELETEs |
+| `source` | Object | Source metadata: DB name, table name, WAL LSN, timestamp |
+| `op` | String | Operation type: `c`=CREATE, `u`=UPDATE, `d`=DELETE, `r`=READ (snapshot) |
+| `ts_ms` | Long | Timestamp (milliseconds) when Debezium processed the event |
 
 ---
 
-### Ví Dụ Schema Avro — Bảng `orders`
+### Example Avro Schema — `orders` table
 
 **Key Schema** (`northwind.public.orders-key`):
 ```json
@@ -96,7 +96,7 @@ Mỗi message value trên Kafka có cấu trúc chuẩn Debezium:
 }
 ```
 
-**Value Schema** (`northwind.public.orders-value`) — rút gọn:
+**Value Schema** (`northwind.public.orders-value`) — simplified:
 ```json
 {
   "type": "record",
@@ -138,9 +138,9 @@ Mỗi message value trên Kafka có cấu trúc chuẩn Debezium:
 
 ---
 
-### Ví Dụ Message Thực Tế
+### Example Real-world Message
 
-**Sự kiện: UPDATE đơn hàng `order_id = 10248`**
+**Event: UPDATE on order `order_id = 10248`**
 
 ```json
 {
@@ -167,13 +167,13 @@ Mỗi message value trên Kafka có cấu trúc chuẩn Debezium:
 
 ---
 
-## 3. Cấu Trúc MinIO S3 Data Lake
+## 3. MinIO S3 Data Lake Structure
 
-### Layout Thư Mục
+### Folder Layout
 
 ```
 northwind-data-lake/                          ← Bucket
-└── topics/                                   ← Prefix mặc định của S3 Sink
+└── topics/                                   ← S3 Sink default prefix
     ├── northwind.public.orders/
     │   └── year=2024/
     │       └── month=01/
@@ -194,36 +194,36 @@ northwind-data-lake/                          ← Bucket
         └── ...
 ```
 
-### Quy Tắc Đặt Tên File
+### File Naming Convention
 
 **Pattern**: `{topic}+{partition}+{offset}.avro`
 
-| Phần | Ví Dụ | Giải Thích |
+| Part | Example | Explanation |
 |---|---|---|
-| `topic` | `northwind.public.orders` | Tên Kafka topic |
-| `partition` | `0` | Số partition Kafka |
-| `offset` | `0000000050` | Offset đầu tiên trong file (10 chữ số, zero-padded) |
+| `topic` | `northwind.public.orders` | Kafka topic name |
+| `partition` | `0` | Kafka partition number |
+| `offset` | `0000000050` | First offset in the file (10 digits, zero-padded) |
 
 ---
 
-## 4. Chính Sách Schema Evolution
+## 4. Schema Evolution Policy
 
-| Loại Thay Đổi | Được Phép? | Ghi Chú |
+| Change Type | Allowed? | Notes |
 |---|---|---|
-| Thêm column mới (nullable) | ✅ Có | Phải có `default: null` trong Avro schema |
-| Xóa column | ❌ Không | Breaking change — cần migration plan |
-| Đổi tên column | ❌ Không | Breaking change — cần alias |
-| Thay đổi kiểu dữ liệu | ❌ Không | Breaking change — cần version mới |
-| Thêm bảng mới vào CDC | ✅ Có | Cập nhật `table.include.list` trong Debezium config |
+| Add new column (nullable) | ✅ Yes | Must have `default: null` in Avro schema |
+| Delete column | ❌ No | Breaking change — requires migration plan |
+| Rename column | ❌ No | Breaking change — requires alias |
+| Data type change | ❌ No | Breaking change — requires versioning |
+| Add new table to CDC | ✅ Yes | Update `table.include.list` in Debezium config |
 
 ---
 
-## 5. Quy Trình Khi Thay Đổi Contract
+## 5. Contract Change Process
 
-Khi cần thay đổi bất kỳ contract nào:
+When a contract needs to be changed:
 
-1. **Thông báo** cho tất cả team liên quan ít nhất **1 tuần** trước
-2. **Tạo nhánh** riêng cho migration
-3. **Kiểm tra** backward compatibility của Avro schema trước khi apply
-4. **Cập nhật** tài liệu này cùng lúc với code change
-5. **Không merge** cho đến khi downstream team xác nhận sẵn sàng
+1. **Notify** all relevant teams at least **1 week** in advance
+2. **Create a branch** specifically for migration
+3. **Verify** backward compatibility of Avro schema before applying
+4. **Update** this document concurrently with the code change
+5. **Do not merge** until downstream teams confirm readiness

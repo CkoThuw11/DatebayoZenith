@@ -1,34 +1,34 @@
-# 🚀 Hướng Dẫn Chạy Pipeline Trên Local
+# 🚀 Local Pipeline Setup Guide
 
-Tài liệu này hướng dẫn từng bước để khởi động và kiểm tra toàn bộ CDC pipeline trên máy tính cá nhân.
+This document provides a step-by-step guide to starting and testing the entire CDC pipeline on a personal computer.
 
 ---
 
-## Yêu Cầu Hệ Thống
+## System Requirements
 
-| Công Cụ | Phiên Bản | Kiểm Tra |
+| Tool | Version | Verification |
 |---|---|---|
 | Docker | ≥ 24.0 | `docker --version` |
 | Docker Compose | ≥ 2.0 | `docker compose version` |
-| curl | Bất kỳ | `curl --version` |
-| Bash | Bất kỳ | Git Bash (Windows) / Terminal (macOS/Linux) |
-| RAM trống | ≥ 4 GB | Kafka + Connect chiếm ~2 GB |
-| Disk trống | ≥ 3 GB | Images + data volumes |
+| curl | Any | `curl --version` |
+| Bash | Any | Git Bash (Windows) / Terminal (macOS/Linux) |
+| Free RAM | ≥ 4 GB | Kafka + Connect take ~2 GB |
+| Free Disk | ≥ 3 GB | Images + data volumes |
 
 ---
 
-## Bước 1 — Clone & Chuẩn Bị Cấu Hình
+## Step 1 — Clone & Prepare Configuration
 
 ```bash
 # Clone repository
 git clone <repo-url>
 cd DatebayoZenith
 
-# Tạo file .env từ template
+# Create .env from template
 cp .env.example .env
 ```
 
-**File `.env` mặc định** (có thể giữ nguyên khi chạy local):
+**Default `.env` file** (can be left as-is for local runs):
 ```env
 MINIO_ROOT_USER=admin
 MINIO_ROOT_PASSWORD=admin123
@@ -36,13 +36,13 @@ MINIO_ROOT_PASSWORD=admin123
 
 ---
 
-## Bước 2 — Khởi Động Hạ Tầng
+## Step 2 — Start Infrastructure
 
 ```bash
 docker-compose up -d
 ```
 
-**Kết quả mong đợi**:
+**Expected results**:
 ```
 [+] Running 6/6
  ✔ Container kafka            Started
@@ -53,17 +53,17 @@ docker-compose up -d
  ✔ Container postgres-db      Started
 ```
 
-> ⏳ **Lần đầu chạy** mất 5–10 phút vì `kafka-connect` cần tải và cài đặt 2 connector plugins (Debezium + S3 Sink). Đây là bình thường.
+> ⏳ **First run** takes 5–10 minutes because `kafka-connect` needs to download and install two connector plugins (Debezium + S3 Sink). This is normal.
 
 ---
 
-## Bước 3 — Kiểm Tra Trạng Thái Container
+## Step 3 — Verify Container Status
 
 ```bash
 docker-compose ps
 ```
 
-**Kết quả mong đợi** — tất cả phải ở trạng thái `running`:
+**Expected results** — all must be in the `running` state:
 ```
 NAME              IMAGE                                    STATUS
 kafka             confluentinc/cp-kafka:7.4.0             running
@@ -74,24 +74,24 @@ minio             minio/minio                              running
 postgres-db       postgres:15                             running
 ```
 
-**Kiểm tra Kafka Connect đã sẵn sàng**:
+**Check if Kafka Connect is ready**:
 ```bash
 curl -s http://localhost:8083/connectors
-# Kết quả: []  (mảng rỗng — chưa có connector nào được đăng ký)
+# Result: []  (empty array — no connectors registered yet)
 ```
 
-Nếu chưa có response, Kafka Connect đang khởi động — **đợi thêm vài phút**.
+If there is no response, Kafka Connect is still starting — **wait a few more minutes**.
 
 ---
 
-## Bước 4 — Đăng Ký Connectors
+## Step 4 — Register Connectors
 
 ```bash
-# Chạy từ thư mục gốc của project
+# Run from the project root directory
 bash scripts/register-connectors.sh
 ```
 
-**Kết quả mong đợi**:
+**Expected results**:
 ```
 Waiting for Kafka Connect to be ready...
  Kafka Connect is ready!
@@ -105,12 +105,12 @@ All Connectors Registered!
 =========================================
 ```
 
-**Kiểm tra trạng thái connectors**:
+**Check connector status**:
 ```bash
 curl -s http://localhost:8083/connectors/source-postgres-debezium/status | python -m json.tool
 ```
 
-**Kết quả mong đợi**:
+**Expected results**:
 ```json
 {
   "name": "source-postgres-debezium",
@@ -122,81 +122,81 @@ curl -s http://localhost:8083/connectors/source-postgres-debezium/status | pytho
 
 ---
 
-## Bước 5 — Kiểm Tra Pipeline Hoạt Động
+## Step 5 — Verify Pipeline Operation
 
-### 5a. Tạo Dữ Liệu Thử Trong Postgres
+### 5a. Create Test Data in Postgres
 
 ```bash
-# Kết nối vào Postgres
+# Connect to Postgres
 docker exec -it postgres-db psql -U postgres -d northwind
 
-# Thêm một đơn hàng mới
+# Insert a new order
 INSERT INTO orders (order_id, customer_id, employee_id, order_date, required_date)
 VALUES (99999, 'ALFKI', 1, CURRENT_DATE, CURRENT_DATE + 7);
 
-# Cập nhật đơn hàng
+# Update the order
 UPDATE orders SET ship_city = 'Hanoi' WHERE order_id = 99999;
 
-# Thoát
+# Exit
 \q
 ```
 
-### 5b. Kiểm Tra Event Trên Kafka (AKHQ)
+### 5b. Check Events on Kafka (AKHQ)
 
-1. Mở http://localhost:8080
-2. Chọn **Topics** → `northwind.public.orders`
-3. Chọn tab **Messages** — bạn sẽ thấy các events INSERT và UPDATE vừa tạo
+1. Open http://localhost:8080
+2. Select **Topics** → `northwind.public.orders`
+3. Select the **Messages** tab — you should see the INSERT and UPDATE events just created.
 
-### 5c. Kiểm Tra File Trong MinIO
+### 5c. Check Files in MinIO
 
-1. Mở http://localhost:9001
-2. Đăng nhập: `admin` / `admin123`
-3. Vào bucket `northwind-data-lake`
-4. Duyệt theo đường dẫn `topics/northwind.public.orders/year=.../month=.../day=.../`
-5. Sẽ thấy file `.avro` sau khi connector flush (tối đa 60 giây hoặc 50 records)
+1. Open http://localhost:9001
+2. Login: `admin` / `admin123`
+3. Enter bucket `northwind-data-lake`
+4. Browse the path `topics/northwind.public.orders/year=.../month=.../day=.../`
+5. You should see `.avro` files after the connector flushes (max 60 seconds or 50 records).
 
 ---
 
-## Tóm Tắt Các Endpoint Web UI
+## Web UI Endpoints Summary
 
-| Giao Diện | URL | Đăng Nhập |
+| Interface | URL | Login |
 |---|---|---|
-| AKHQ (Kafka UI) | http://localhost:8080 | Không cần |
+| AKHQ (Kafka UI) | http://localhost:8080 | None required |
 | MinIO Console | http://localhost:9001 | `admin` / `admin123` |
-| Kafka Connect REST | http://localhost:8083 | Không cần |
-| Schema Registry | http://localhost:8081 | Không cần |
+| Kafka Connect REST | http://localhost:8083 | None required |
+| Schema Registry | http://localhost:8081 | None required |
 
 ---
 
-## Dừng Pipeline
+## Stopping the Pipeline
 
 ```bash
-# Dừng tất cả container (giữ lại data volumes)
+# Stop all containers (retain data volumes)
 docker-compose down
 
-# Dừng và xóa toàn bộ data (làm sạch hoàn toàn)
+# Stop and remove all data (clean slate)
 docker-compose down -v
 ```
 
 ---
 
-## Xử Lý Sự Cố
+## Troubleshooting
 
-### Kafka Connect liên tục restart
+### Kafka Connect continuously restarts
 
 ```bash
 docker logs kafka-connect --tail 50
 ```
 
-Nếu thấy `Downloading connector...` → đang tải plugin, đợi thêm 5 phút.
+If you see `Downloading connector...` → it is still downloading plugins, wait another 5 minutes.
 
 ---
 
-### Connector ở trạng thái FAILED
+### Connector in FAILED state
 
 ```bash
 curl -s http://localhost:8083/connectors/source-postgres-debezium/status | python -m json.tool
-# Xem trường "tasks[0].trace" để biết lý do lỗi
+# Check "tasks[0].trace" for the error reason
 
 # Restart connector
 curl -X POST http://localhost:8083/connectors/source-postgres-debezium/restart
@@ -204,24 +204,24 @@ curl -X POST http://localhost:8083/connectors/source-postgres-debezium/restart
 
 ---
 
-### MinIO bucket không được tạo (Credentials sai)
+### MinIO bucket not created (Incorrect Credentials)
 
 ```bash
-# Kiểm tra .env
+# Verify .env
 cat .env
 
-# Xem log của script
+# Check script logs
 docker exec minio mc alias set local http://localhost:9000 admin admin123
 ```
 
-Đảm bảo `MINIO_ROOT_USER` và `MINIO_ROOT_PASSWORD` trong `.env` khớp với lệnh trên.
+Ensure `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` in `.env` match the command above.
 
 ---
 
-### Port đã bị chiếm
+### Port already in use
 
 ```powershell
-# Windows — Tìm process đang dùng port 9092
+# Windows — Find process using port 9092
 netstat -ano | findstr :9092
 taskkill /PID <PID> /F
 ```

@@ -1,45 +1,45 @@
-# 🗄️ Postgres — Database Nguồn CDC
+# 🗄️ Postgres — CDC Source Database
 
 **Owner**: Source Team
 
 ---
 
-## Tổng Quan
+## Overview
 
-Thư mục này chứa script khởi tạo cho **database nguồn** của pipeline. PostgreSQL được cấu hình với **Logical Replication** để Debezium có thể đọc WAL và capture mọi thay đổi dữ liệu theo thời gian thực.
+This directory contains initialization scripts for the **source database** of the pipeline. PostgreSQL is configured with **Logical Replication** so that Debezium can read the WAL and capture all data changes in real-time.
 
-Database sử dụng schema **Northwind** — một bộ dữ liệu thương mại mô phỏng kinh điển.
-
----
-
-## Yêu Cầu Để Hỗ Trợ CDC
-
-Postgres instance phải được cấu hình với các tham số sau (đã được set trong `docker-compose.yaml`):
-
-| Tham Số | Giá Trị Yêu Cầu | Lý Do |
-|---|---|---|
-| `wal_level` | `logical` | Bật Logical Decoding — cần thiết để Debezium đọc WAL |
-| `max_replication_slots` | ≥ 1 | Số slot nhân bản (mỗi Debezium connector dùng 1 slot) |
-| `max_wal_senders` | ≥ 1 | Số kết nối WAL sender (mỗi slot cần 1 sender) |
-| User permission | `REPLICATION` | User kết nối phải có quyền `REPLICATION` |
+The database uses the **Northwind** schema — a classic simulated commercial dataset.
 
 ---
 
-## Các Bảng Được CDC Theo Dõi
+## CDC Support Requirements
 
-Debezium hiện được cấu hình để theo dõi **4 bảng** trong schema `public`:
+The Postgres instance must be configured with the following parameters (already set in `docker-compose.yaml`):
 
-| Bảng | Mô Tả | Kafka Topic |
+| Parameter | Required Value | Reason |
 |---|---|---|
-| `public.orders` | Đơn hàng của khách | `northwind.public.orders` |
-| `public.order_details` | Chi tiết sản phẩm trong đơn | `northwind.public.order_details` |
-| `public.products` | Danh mục sản phẩm | `northwind.public.products` |
-| `public.customers` | Thông tin khách hàng | `northwind.public.customers` |
+| `wal_level` | `logical` | Enables Logical Decoding — necessary for Debezium to read WAL |
+| `max_replication_slots` | ≥ 1 | Number of replication slots (each Debezium connector uses 1 slot) |
+| `max_wal_senders` | ≥ 1 | Number of WAL sender connections (each slot needs 1 sender) |
+| User permission | `REPLICATION` | The connecting user must have `REPLICATION` privileges |
 
-### Cột Chính Quan Trọng
+---
+
+## Tables Monitored by CDC
+
+Debezium is currently configured to monitor **4 tables** in the `public` schema:
+
+| Table | Description | Kafka Topic |
+|---|---|---|
+| `public.orders` | Customer orders | `northwind.public.orders` |
+| `public.order_details` | Order item details | `northwind.public.order_details` |
+| `public.products` | Product catalog | `northwind.public.products` |
+| `public.customers` | Customer information | `northwind.public.customers` |
+
+### Key Columns of Interest
 
 **`orders`**:
-- `order_id` (PK) — Được dùng làm Avro **key**
+- `order_id` (PK) — Used as the Avro **key**
 - `customer_id`, `employee_id`, `order_date`, `ship_city`
 
 **`order_details`**:
@@ -56,38 +56,38 @@ Debezium hiện được cấu hình để theo dõi **4 bảng** trong schema `
 
 ---
 
-## Cơ Chế Replica Identity
+## Replica Identity Mechanism
 
-Mặc định PostgreSQL chỉ ghi giá trị `after` vào WAL khi UPDATE. Với cấu hình:
+By default, PostgreSQL only records the `after` value in the WAL during an UPDATE. With this configuration:
 
 ```sql
 ALTER TABLE public.orders REPLICA IDENTITY FULL;
 ```
 
-Postgres sẽ ghi **cả `before` và `after`** — cho phép downstream biết được dữ liệu **trước khi thay đổi**.
+Postgres will record **both `before` and `after`** — allowing downstream systems to know the data **before the change**.
 
-Debezium tự động thực hiện điều này thông qua tham số:
+Debezium automatically handles this via the parameter:
 ```json
 "replica.identity.autoset.values": "public.*:FULL"
 ```
 
 ---
 
-## Khởi Tạo Local
+## Local Initialization
 
-Khi chạy `docker-compose up`, file `init.sql` sẽ được tự động thực thi để tạo toàn bộ schema Northwind và seed dữ liệu mẫu:
+When running `docker-compose up`, the `init.sql` file will be automatically executed to create the entire Northwind schema and seed sample data:
 
 ```bash
-# Khởi tạo database (tự động khi docker-compose up)
+# Initialize database (automatic with docker-compose up)
 docker-compose up -d postgres-db
 
-# Kiểm tra database đã sẵn sàng
+# Verify database is ready
 docker exec postgres-db psql -U postgres -d northwind -c "\dt public.*"
 ```
 
-**Kết quả mong đợi** — danh sách các bảng Northwind:
+**Expected results** — list of Northwind tables:
 ```
-           List of relations
+            List of relations
  Schema |       Name        | Type  |  Owner   
 --------+-------------------+-------+----------
  public | categories        | table | postgres
@@ -101,13 +101,13 @@ docker exec postgres-db psql -U postgres -d northwind -c "\dt public.*"
 
 ---
 
-## Kết Nối Tới Postgres
+## Connecting to Postgres
 
 ```bash
-# Dùng psql trong container
+# Using psql inside the container
 docker exec -it postgres-db psql -U postgres -d northwind
 
-# Dùng client ngoài (DBeaver, TablePlus, ...)
+# Using an external client (DBeaver, TablePlus, ...)
 Host:     localhost
 Port:     5432
 Database: northwind

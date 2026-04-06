@@ -1,15 +1,15 @@
-# 🔌 Hướng Dẫn Cấu Hình Connectors
+# 🔌 Connector Configuration Guide
 
-Tài liệu này giải thích chi tiết từng field trong hai file cấu hình Kafka Connect connector nằm trong thư mục `connectors/`.
+This document explains in detail each field in the two Kafka Connect connector configuration files located in the `connectors/` directory.
 
 ---
 
-## Tổng Quan
+## Overview
 
-| File | Connector | Vai Trò |
+| File | Connector | Role |
 |---|---|---|
-| `debezium-postgres.json` | Debezium PostgreSQL Source | Đọc WAL từ Postgres, đẩy events vào Kafka |
-| `s3-sink-minio-production.json` | Confluent S3 Sink | Đọc Kafka topics, ghi Avro files vào MinIO |
+| `debezium-postgres.json` | Debezium PostgreSQL Source | Reads WAL from Postgres, pushes events to Kafka |
+| `s3-sink-minio-production.json` | Confluent S3 Sink | Reads Kafka topics, writes Avro files to MinIO |
 
 ---
 
@@ -43,46 +43,46 @@ Tài liệu này giải thích chi tiết từng field trong hai file cấu hìn
 }
 ```
 
-### Giải Thích Từng Field
+### Field Explanations
 
-#### Thông Tin Cơ Bản
+#### Basic Information
 
-| Field | Giá Trị | Giải Thích |
+| Field | Value | Explanation |
 |---|---|---|
-| `name` | `source-postgres-debezium` | Tên định danh connector (dùng trong REST API). Tuân thủ contract: `source-postgres-{name}` |
-| `connector.class` | `...PostgresConnector` | Class Java của Debezium plugin |
-| `tasks.max` | `1` | Số task song song. Với CDC, **phải để `1`** — stream WAL phải có thứ tự tuyệt đối |
+| `name` | `source-postgres-debezium` | Unique name for the connector (used in REST API). Follows contract: `source-postgres-{name}` |
+| `connector.class` | `...PostgresConnector` | Java class of the Debezium plugin |
+| `tasks.max` | `1` | Number of parallel tasks. For CDC, **must be set to `1`** — the WAL stream must be strictly ordered |
 
-#### Kết Nối Database
+#### Database Connection
 
-| Field | Giá Trị | Giải Thích |
+| Field | Value | Explanation |
 |---|---|---|
-| `database.hostname` | `postgres-db` | Hostname trong Docker network (tên service trong docker-compose) |
-| `database.port` | `5432` | Port mặc định PostgreSQL |
-| `database.user` | `postgres` | User có quyền `REPLICATION` |
-| `database.password` | `postgres` | Mật khẩu (nên dùng biến môi trường ở production) |
-| `database.dbname` | `northwind` | Tên database cần CDC |
-| `database.server.name` | `northwind` | **Namespace logic** — dùng làm prefix cho tên Kafka topics |
+| `database.hostname` | `postgres-db` | Hostname within the Docker network (service name in docker-compose) |
+| `database.port` | `5432` | Default PostgreSQL port |
+| `database.user` | `postgres` | User with `REPLICATION` privileges |
+| `database.password` | `postgres` | Password (should use environment variables in production) |
+| `database.dbname` | `northwind` | Name of the database to monitor |
+| `database.server.name` | `northwind` | **Logical namespace** — used as a prefix for Kafka topic names |
 
-#### Cấu Hình CDC
+#### CDC Configuration
 
-| Field | Giá Trị | Giải Thích |
+| Field | Value | Explanation |
 |---|---|---|
-| `plugin.name` | `pgoutput` | Plugin đọc WAL. `pgoutput` là plugin native của Postgres 10+, **không cần cài thêm** |
-| `publication.autocreate.mode` | `all_tables` | Debezium tự tạo Postgres Publication cho tất cả bảng trong `table.include.list` |
-| `replica.identity.autoset.values` | `public.*:FULL` | Tự động set `REPLICA IDENTITY FULL` cho tất cả bảng trong schema `public`. Cần thiết để có dữ liệu `before` khi UPDATE |
-| `schema.include.list` | `public` | Chỉ theo dõi schema `public` |
-| `table.include.list` | `public.orders,...` | Danh sách bảng cần CDC (cách nhau bởi dấu phẩy, không dấu cách) |
+| `plugin.name` | `pgoutput` | WAL reading plugin. `pgoutput` is native to Postgres 10+ and **does not require extra installation** |
+| `publication.autocreate.mode` | `all_tables` | Debezium automatically creates a Postgres Publication for all tables in `table.include.list` |
+| `replica.identity.autoset.values` | `public.*:FULL` | Automatically sets `REPLICA IDENTITY FULL` for all tables in the `public` schema. Required for `before` data in UPDATE events |
+| `schema.include.list` | `public` | Monitor only the `public` schema |
+| `table.include.list` | `public.orders,...` | List of tables to monitor (comma-separated, no spaces) |
 
 #### Serialization
 
-| Field | Giá Trị | Giải Thích |
+| Field | Value | Explanation |
 |---|---|---|
-| `key.converter` | `AvroConverter` | Serialize message **key** bằng Avro |
-| `key.converter.schema.registry.url` | `http://schema-registry:8081` | URL Schema Registry để đăng ký key schema |
-| `value.converter` | `AvroConverter` | Serialize message **value** bằng Avro |
-| `value.converter.schema.registry.url` | `http://schema-registry:8081` | URL Schema Registry để đăng ký value schema |
-| `topic.prefix` | `northwind` | Prefix cho tên topic. Topic = `northwind.public.orders` |
+| `key.converter` | `AvroConverter` | Serializes message **keys** using Avro |
+| `key.converter.schema.registry.url` | `http://schema-registry:8081` | Schema Registry URL for registering key schemas |
+| `value.converter` | `AvroConverter` | Serializes message **values** using Avro |
+| `value.converter.schema.registry.url` | `http://schema-registry:8081` | Schema Registry URL for registering value schemas |
+| `topic.prefix` | `northwind` | Prefix for topic names. Final topic name = `northwind.public.orders` |
 
 ---
 
@@ -118,89 +118,89 @@ Tài liệu này giải thích chi tiết từng field trong hai file cấu hìn
 }
 ```
 
-### Giải Thích Từng Field
+### Field Explanations
 
-#### Thông Tin Cơ Bản
+#### Basic Information
 
-| Field | Giá Trị | Giải Thích |
+| Field | Value | Explanation |
 |---|---|---|
-| `name` | `minio-s3-sink-connector` | Tên connector trong Kafka Connect |
-| `connector.class` | `...S3SinkConnector` | Class Java của Confluent S3 Sink plugin |
-| `tasks.max` | `2` | Số task song song. Sink có thể chạy nhiều task vì không cần đảm bảo thứ tự global |
-| `topics` | (danh sách 4 topics) | Các Kafka topics sẽ được consume và ghi vào S3 |
+| `name` | `minio-s3-sink-connector` | Unique name for the connector in Kafka Connect |
+| `connector.class` | `...S3SinkConnector` | Java class of the Confluent S3 Sink plugin |
+| `tasks.max` | `2` | Number of parallel tasks. Sink connectors can run multiple tasks as global ordering is not required |
+| `topics` | (list of 4 topics) | Kafka topics to be consumed and written to S3 |
 
-#### Kết Nối MinIO
+#### MinIO Connection
 
-| Field | Giá Trị | Giải Thích |
+| Field | Value | Explanation |
 |---|---|---|
-| `s3.region` | `us-east-1` | MinIO không thực sự dùng region, nhưng SDK yêu cầu — để bất kỳ giá trị hợp lệ nào |
-| `s3.bucket.name` | `northwind-data-lake` | Tên bucket MinIO đã tạo sẵn (xem `register-connectors.sh`) |
-| `s3.part.size` | `5242880` | 5 MB — Kích thước một phần trong multipart upload. Phải ≥ 5 MB theo S3 spec |
-| `store.url` | `http://minio:9000` | URL MinIO API endpoint (thay thế AWS S3 endpoint) |
-| `storage.class` | `S3Storage` | Backend storage implementation cho S3-compatible |
+| `s3.region` | `us-east-1` | MinIO doesn't strictly use regions, but the SDK requires a valid value |
+| `s3.bucket.name` | `northwind-data-lake` | Pre-created MinIO bucket name (see `register-connectors.sh`) |
+| `s3.part.size` | `5242880` | 5 MB — size of a single part in multipart upload. Must be ≥ 5 MB per S3 spec |
+| `store.url` | `http://minio:9000` | MinIO API endpoint URL (replaces AWS S3 endpoint) |
+| `storage.class` | `S3Storage` | Backend storage implementation for S3-compatible systems |
 
-#### Định Dạng File
+#### File Format
 
-| Field | Giá Trị | Giải Thích |
+| Field | Value | Explanation |
 |---|---|---|
-| `format.class` | `AvroFormat` | Ghi file dưới dạng **Avro** (giữ nguyên schema từ Kafka) |
+| `format.class` | `AvroFormat` | Writes files in **Avro** format (preserving Kafka schema) |
 
-> **Lưu ý**: Có thể chuyển sang `ParquetFormat` để tương thích tốt hơn với các query engine (Spark, Trino, Athena), nhưng cần cấu hình thêm.
+> **Note**: Can be changed to `ParquetFormat` for better compatibility with query engines (Spark, Trino, Athena), but requires additional configuration.
 
-#### Phân Vùng Thời Gian (Partitioning)
+#### Time-Based Partitioning
 
-| Field | Giá Trị | Giải Thích |
+| Field | Value | Explanation |
 |---|---|---|
-| `partitioner.class` | `TimeBasedPartitioner` | Phân vùng file theo thời gian của event |
-| `path.format` | `'year'=YYYY/'month'=MM/'day'=dd` | Format thư mục. Dấu nháy đơn bao ngoài text literal |
-| `partition.duration.ms` | `86400000` | 86400000ms = **24 giờ** — tạo thư mục mới mỗi ngày |
-| `timezone` | `UTC` | Múi giờ dùng để tính timestamp khi phân vùng |
-| `locale` | `en-US` | Locale cho format ngày tháng |
+| `partitioner.class` | `TimeBasedPartitioner` | Partitions files based on the event's timestamp |
+| `path.format` | `'year'=YYYY/'month'=MM/'day'=dd` | Folder format. Single quotes wrap literal text |
+| `partition.duration.ms` | `86400000` | 86,400,000ms = **24 hours** — creates a new folder every day |
+| `timezone` | `UTC` | Timezone used to calculate the timestamp for partitioning |
+| `locale` | `en-US` | Locale for date formatting |
 
-**Kết quả**: File sẽ nằm ở `northwind-data-lake/topics/northwind.public.orders/year=2024/month=01/day=15/`
+**Result**: Files will be located at `northwind-data-lake/topics/northwind.public.orders/year=2024/month=01/day=15/`
 
 #### Flush & Rotation
 
-| Field | Giá Trị | Giải Thích |
+| Field | Value | Explanation |
 |---|---|---|
-| `flush.size` | `50` | Flush khi tích lũy đủ **50 records** |
-| `rotate.interval.ms` | `60000` | Hoặc flush mỗi **60 giây** (60000ms), tùy điều kiện nào đến trước |
+| `flush.size` | `50` | Flush after accumulating **50 records** |
+| `rotate.interval.ms` | `60000` | Or flush every **60 seconds** (60,000ms), whichever comes first |
 
-> **Tradeoff**: `flush.size` nhỏ → nhiều file nhỏ (less efficient để query). `flush.size` lớn → ít file hơn nhưng delay cao hơn. Giá trị `50` phù hợp cho môi trường dev/test.
+> **Tradeoff**: Small `flush.size` → many small files (less efficient for queries). Large `flush.size` → fewer files but higher delay. A value of `50` is suitable for dev/test environments.
 
 ---
 
-## 3. Vòng Đời Connector
+## 3. Connector Lifecycle
 
 ```
 [Deploy]  → POST /connectors  → [RUNNING]
-                                    ↓ Lỗi xảy ra
+                                    ↓ Error occurs
                                [FAILED]
-                                    ↓ Khắc phục xong
+                                    ↓ Fix applied
                           PUT /connectors/{name}/restart → [RUNNING]
-                                    ↓ Không cần nữa
+                                    ↓ No longer needed
                           DELETE /connectors/{name}  → [DELETED]
 ```
 
-### Các Lệnh Quản Lý Qua REST API
+### Management via REST API
 
 ```bash
-# Xem danh sách connectors
+# List all connectors
 curl http://localhost:8083/connectors
 
-# Kiểm tra trạng thái
+# Check connector status
 curl http://localhost:8083/connectors/source-postgres-debezium/status | jq
 
-# Restart connector bị FAILED
+# Restart FAILED connector
 curl -X POST http://localhost:8083/connectors/source-postgres-debezium/restart
 
-# Xem cấu hình hiện tại
+# View current configuration
 curl http://localhost:8083/connectors/source-postgres-debezium/config | jq
 
-# Xóa connector
+# Delete connector
 curl -X DELETE http://localhost:8083/connectors/source-postgres-debezium
 
-# Cập nhật cấu hình (ví dụ thêm bảng)
+# Update configuration (e.g., add a table)
 curl -X PUT http://localhost:8083/connectors/source-postgres-debezium/config \
   -H "Content-Type: application/json" \
   -d '{ "table.include.list": "public.orders,...,public.new_table", ... }'
@@ -208,11 +208,11 @@ curl -X PUT http://localhost:8083/connectors/source-postgres-debezium/config \
 
 ---
 
-## 4. Xử Lý Sự Cố Connector
+## 4. Connector Troubleshooting
 
-| Triệu Chứng | Kiểm Tra | Giải Pháp |
+| Symptom | Inspection | Solution |
 |---|---|---|
-| Status `FAILED` | `GET /connectors/{name}/status` → xem `trace` | Xem log: `docker logs kafka-connect` |
-| Không có messages trên topic | Kiểm tra Debezium có đang chạy không | Restart connector, kiểm tra Postgres WAL |
-| File không xuất hiện ở MinIO | S3 Sink có RUNNING không? | Kiểm tra credentials MinIO trong `.env` |
-| Schema registry conflict | Xem log kafka-connect | Xóa schema cũ hoặc tắt schema compatibility |
+| Status `FAILED` | `GET /connectors/{name}/status` → check `trace` | Check logs: `docker logs kafka-connect` |
+| No messages on topic | Check if Debezium is running | Restart connector, verify Postgres WAL settings |
+| Files not appearing in MinIO | Is S3 Sink `RUNNING`? | Verify MinIO credentials in `.env` |
+| Schema registry conflict | Check kafka-connect logs | Delete old schema or disable schema compatibility |
