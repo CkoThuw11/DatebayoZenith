@@ -1,39 +1,39 @@
-# 📐 Kiến Trúc Pipeline
+# 📐 Pipeline Architecture
 
-Tài liệu này mô tả chi tiết kiến trúc end-to-end của CDC (Change Data Capture) Pipeline — từ cơ sở dữ liệu nguồn PostgreSQL đến Data Lake MinIO.
+This document describes in detail the end-to-end architecture of the CDC (Change Data Capture) Pipeline — from the PostgreSQL source database to the MinIO Data Lake.
 
 ---
 
-## Luồng Dữ Liệu Tổng Thể
+## Overall Data Flow
 
-![Kiến trúc CDC Pipeline: PostgreSQL → Debezium → Kafka → Schema Registry → S3 Sink → MinIO](assets/architecture.png)
+![CDC Pipeline Architecture: PostgreSQL → Debezium → Kafka → Schema Registry → S3 Sink → MinIO](assets/architecture.png)
 
-> **Mô tả luồng**: PostgreSQL ghi thay đổi vào WAL → Debezium đọc WAL qua Logical Replication → đẩy Avro Events lên Apache Kafka (KRaft Mode) → Schema Registry validate cấu trúc Avro → S3 Sink Connector consume topics và ghi Avro files phân vùng theo ngày vào MinIO Data Lake.
+> **Flow Description**: PostgreSQL records changes in the WAL → Debezium reads the WAL via Logical Replication → pushes Avro Events to Apache Kafka (KRaft Mode) → Schema Registry validates the Avro structure → S3 Sink Connector consumes topics and writes day-partitioned Avro files to the MinIO Data Lake.
 
 <details>
-<summary>📊 Xem dạng sơ đồ văn bản (Mermaid)</summary>
+<summary>📊 View diagram as text (Mermaid)</summary>
 
 ```mermaid
 flowchart LR
-    subgraph SOURCE["🗄️ Nguồn Dữ Liệu"]
+    subgraph SOURCE["🗄️ Data Source"]
         PG["PostgreSQL 15\nNorthwind DB\nwal_level=logical"]
     end
 
-    subgraph INGEST["📡 Thu Thập"]
+    subgraph INGEST["📡 Ingestion"]
         DEB["Debezium\nSource Connector\n(pgoutput plugin)"]
     end
 
-    subgraph BACKBONE["🚀 Xương Sống Sự Kiện"]
+    subgraph BACKBONE["🚀 Event Backbone"]
         KAFKA["Apache Kafka\nKRaft Mode\nPort: 9092"]
         SR["Schema Registry\nAvro Format\nPort: 8081"]
     end
 
-    subgraph SINK["💾 Lưu Trữ"]
+    subgraph SINK["💾 Storage"]
         S3SINK["S3 Sink Connector\n(TimeBasedPartitioner)"]
         MINIO["MinIO\nS3-Compatible\nData Lake\nPort: 9000"]
     end
 
-    subgraph MONITOR["🔍 Giám Sát"]
+    subgraph MONITOR["🔍 Monitoring"]
         AKHQ["AKHQ Web UI\nPort: 8080"]
     end
 
@@ -50,25 +50,25 @@ flowchart LR
 
 ---
 
-## Chi Tiết Từng Component
+## Component Details
 
-### 1. 🗄️ PostgreSQL 15 — Nguồn Dữ Liệu
+### 1. 🗄️ PostgreSQL 15 — Data Source
 
 **Container**: `postgres-db` | **Port**: `5432`
 
-Đây là hệ thống cơ sở dữ liệu quan hệ (OLTP) chứa schema **Northwind** — một bộ dữ liệu thương mại điện tử mô phỏng với các bảng `orders`, `order_details`, `products`, `customers`.
+This is the relational database system (OLTP) containing the **Northwind** schema — a simulated e-commerce dataset with tables like `orders`, `order_details`, `products`, and `customers`.
 
-**Cấu hình CDC quan trọng** (được set trong `docker-compose.yaml`):
+**Critical CDC Configuration** (set in `docker-compose.yaml`):
 
-| Tham Số | Giá Trị | Ý Nghĩa |
+| Parameter | Value | Meaning |
 |---|---|---|
-| `wal_level` | `logical` | Bật Logical Decoding để Debezium đọc WAL |
-| `max_replication_slots` | `10` | Số slot nhân bản tối đa |
-| `max_wal_senders` | `10` | Số kết nối WAL sender song song |
+| `wal_level` | `logical` | Enables Logical Decoding for Debezium to read the WAL |
+| `max_replication_slots` | `10` | Maximum number of replication slots |
+| `max_wal_senders` | `10` | Number of simultaneous WAL sender connections |
 
-> **WAL (Write-Ahead Log)**: Postgres ghi mọi thay đổi vào WAL trước khi apply vào disk. Debezium đọc WAL này để bắt các sự kiện INSERT/UPDATE/DELETE mà **không cần trigger hay polling**.
+> **WAL (Write-Ahead Log)**: Postgres records all changes to the WAL before applying them to disk. Debezium reads this WAL to capture INSERT/UPDATE/DELETE events **without requiring triggers or polling**.
 
-**Các bảng được CDC theo dõi**:
+**Tables Monitored by CDC**:
 - `public.orders`
 - `public.order_details`
 - `public.products`
@@ -76,20 +76,20 @@ flowchart LR
 
 ---
 
-### 2. 📡 Debezium Source Connector — Thu Thập Thay Đổi
+### 2. 📡 Debezium Source Connector — Change Collection
 
 **Plugin**: `debezium-connector-postgresql:2.4.2` | **Config**: [`connectors/debezium-postgres.json`](../connectors/debezium-postgres.json)
 
-Debezium là một **Kafka Connect plugin** hoạt động như một consumer của Postgres WAL. Nó:
+Debezium is a **Kafka Connect plugin** that acts as a consumer of the Postgres WAL. It:
 
-1. **Đọc WAL** liên tục thông qua `pgoutput` plugin (native của Postgres 10+)
-2. **Chuyển đổi** mỗi thay đổi thành một **Avro event** có cấu trúc chuẩn Debezium envelope
-3. **Đẩy** event vào Kafka topic tương ứng theo pattern `{topic.prefix}.{schema}.{table}`
+1. **Reads the WAL** continuously via the `pgoutput` plugin (native to Postgres 10+)
+2. **Converts** each change into a structured **Avro event** wrapped in a standard Debezium envelope
+3. **Pushes** the event to the corresponding Kafka topic following the pattern `{topic.prefix}.{schema}.{table}`
 
-**Cơ chế `REPLICA IDENTITY FULL`**: Mặc định Postgres chỉ log giá trị `after` khi UPDATE. Với `FULL`, cả `before` (snapshot dữ liệu cũ) cũng được ghi lại — cần thiết để downstream xử lý diff.
+**`REPLICA IDENTITY FULL` Mechanism**: By default, Postgres only logs the `after` value during an UPDATE. With `FULL`, the `before` value (snapshot of old data) is also recorded — necessary for downstream systems to handle diffs.
 
 ```
-Topic được tạo:
+Topics Created:
   northwind.public.orders
   northwind.public.order_details
   northwind.public.products
@@ -98,58 +98,58 @@ Topic được tạo:
 
 ---
 
-### 3. 🚀 Apache Kafka — Xương Sống Sự Kiện
+### 3. 🚀 Apache Kafka — Event Backbone
 
 **Image**: `confluentinc/cp-kafka:7.4.0` | **Port**: `9092` (external), `29092` (internal)
 
-Kafka đóng vai trò **buffer bất biến, có thứ tự, fault-tolerant** cho toàn bộ pipeline.
+Kafka serves as the **immutable, ordered, fault-tolerant buffer** for the entire pipeline.
 
-**Chế độ KRaft (không cần ZooKeeper)**:
+**KRaft Mode (ZooKeeper-less)**:
 
 ```
-Truyền thống: Kafka + ZooKeeper (2 hệ thống)
-KRaft Mode:   Kafka tự quản lý metadata (1 hệ thống)
+Traditional: Kafka + ZooKeeper (2 systems)
+KRaft Mode:   Kafka manages its own metadata (1 system)
 ```
 
-| Lý Do Chọn KRaft | Giải Thích |
+| Reasons for Choosing KRaft | Explanation |
 |---|---|
-| Đơn giản hóa | Không cần deploy & maintain ZooKeeper |
-| Production-ready | Kafka 3.x chính thức hỗ trợ từ bản 3.3+ |
-| Giảm latency | Ít hops mạng hơn khi leader election |
+| Simplification | No need to deploy & maintain ZooKeeper |
+| Production-ready | Kafka 3.x officially supports it since version 3.3+ |
+| Reduced Latency | Fewer network hops during leader election |
 
 ---
 
-### 4. 📋 Schema Registry — Kiểm Soát Schema
+### 4. 📋 Schema Registry — Schema Governance
 
 **Image**: `confluentinc/cp-schema-registry:7.4.0` | **Port**: `8081`
 
-Schema Registry lưu **Avro schemas** tập trung và enforce chúng khi producer ghi / consumer đọc.
+Schema Registry stores **Avro schemas** centrally and enforces them when producers write or consumers read.
 
-**Tại sao Avro thay vì JSON?**
+**Why Avro instead of JSON?**
 
-| Tiêu Chí | Avro | JSON |
+| Criterion | Avro | JSON |
 |---|---|---|
-| Kích thước | ✅ Nhỏ (binary) | ❌ Lớn (text) |
-| Schema enforcement | ✅ Bắt buộc | ❌ Tùy chọn |
-| Schema evolution | ✅ Backward/Forward compat | ❌ Không kiểm soát |
-| Tốc độ đọc/ghi | ✅ Nhanh hơn | ❌ Chậm hơn |
+| Size | ✅ Small (binary) | ❌ Large (text) |
+| Schema enforcement | ✅ Mandatory | ❌ Optional |
+| Schema evolution | ✅ Backward/Forward compat | ❌ No control |
+| Read/Write speed | ✅ Faster | ❌ Slower |
 
 ---
 
-### 5. 💾 S3 Sink Connector — Ghi Vào Data Lake
+### 5. 💾 S3 Sink Connector — Writing to Data Lake
 
 **Plugin**: `kafka-connect-s3:10.5.7` | **Config**: [`connectors/s3-sink-minio-production.json`](../connectors/s3-sink-minio-production.json)
 
-Connector này consume các Kafka topics và ghi dữ liệu thành **Avro files phân vùng theo thời gian** vào MinIO.
+This connector consumes Kafka topics and writes the data as **time-partitioned Avro files** into MinIO.
 
-**Cơ chế flush**:
+**Flush Mechanism**:
 ```
-Flush khi: số records >= 50 (flush.size)
-       HOẶC: thời gian >= 60 giây (rotate.interval.ms)
-(tùy điều kiện nào xảy ra trước)
+Flush when: record count >= 50 (flush.size)
+        OR: time elapsed >= 60 seconds (rotate.interval.ms)
+(whichever condition is met first)
 ```
 
-**Partitioning layout trong MinIO**:
+**Partitioning layout in MinIO**:
 ```
 northwind-data-lake/
 └── topics/
@@ -163,11 +163,11 @@ northwind-data-lake/
 
 ---
 
-### 6. 🪣 MinIO — Data Lake S3-Compatible
+### 6. 🪣 MinIO — S3-Compatible Data Lake
 
 **Image**: `minio/minio` | **API Port**: `9000` | **UI Port**: `9001`
 
-MinIO là object storage **tương thích hoàn toàn với Amazon S3 API**. Mọi công cụ dùng AWS S3 SDK đều dùng được với MinIO (Spark, Trino, dbt, ...).
+MinIO is object storage that is **fully compatible with the Amazon S3 API**. Any tool using the AWS S3 SDK can be used with MinIO (Spark, Trino, dbt, etc.).
 
 ---
 
@@ -175,27 +175,27 @@ MinIO là object storage **tương thích hoàn toàn với Amazon S3 API**. M�
 
 **Image**: `tchiotludo/akhq` | **Port**: `8080`
 
-Giao diện web để:
-- Xem topics và messages realtime
-- Kiểm tra consumer group lag
-- Xem schemas đã đăng ký trong Schema Registry
-- Theo dõi trạng thái Kafka Connect connectors
+A web interface for:
+- Viewing topics and messages in real-time
+- Checking consumer group lag
+- Viewing schemas registered in Schema Registry
+- Monitoring the status of Kafka Connect connectors
 
 ---
 
-## Quyết Định Thiết Kế
+## Design Decisions
 
-| Quyết Định | Lựa Chọn | Lý Do |
+| Decision | Choice | Reason |
 |---|---|---|
-| Kafka mode | KRaft (không ZooKeeper) | Đơn giản hóa infra, Confluent 7.4 đã stable |
-| Serialization | Avro + Schema Registry | Type-safe, compact, schema evolution |
-| Sink format | Avro (có thể đổi thành Parquet) | Tương thích connector S3 sẵn có |
-| Partitioning | TimeBasedPartitioner (ngày) | Query theo date range dễ dàng |
-| CDC plugin | `pgoutput` (native) | Không cần cài thêm extension vào Postgres |
+| Kafka mode | KRaft (ZooKeeper-less) | Simplifies infrastructure, stable in Confluent 7.4 |
+| Serialization | Avro + Schema Registry | Type-safe, compact, supports schema evolution |
+| Sink format | Avro (changeable to Parquet) | Compatible with out-of-the-box S3 connectors |
+| Partitioning | TimeBasedPartitioner (daily) | Simplifies date-range queries |
+| CDC plugin | `pgoutput` (native) | No additional extensions required in Postgres |
 
 ---
 
-## Cổng Dịch Vụ
+## Service Ports
 
 | Service | Internal (Docker) | External (Host) |
 |---|---|---|
