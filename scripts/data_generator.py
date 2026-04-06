@@ -5,6 +5,7 @@ import logging
 from datetime import datetime, timedelta
 import psycopg2
 from faker import Faker
+import pandas as pd
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
