@@ -120,7 +120,8 @@ bash scripts/register-connectors.sh
 
 ```bash
 # Đợi Trino healthy (~30s), sau đó tạo 4 external tables
-docker exec -it trino trino --file /init/create_tables.sql
+docker cp trino/init/create_tables.sql trino:/tmp/create_tables.sql
+docker exec -it trino trino --server http://localhost:8090 -f /tmp/create_tables.sql
 ```
 
 **Step 6 — Access Web UIs for verification**
