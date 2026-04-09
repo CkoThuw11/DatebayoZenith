@@ -5,30 +5,7 @@ Trino enables developers to query **Parquet files** written by Spark into MinIO 
 ---
 
 ## Architecture
-
-```
-PostgreSQL  →  Debezium  →  Kafka  →  S3 Sink  →  MinIO (Avro)
-                                                         │
-                                                  Spark CDC Engine
-                                                  (every 3 min)
-                                                         │
-                                                         ▼
-                                                  MinIO (Parquet)
-                                         s3a://northwind-data-lake/parquet/
-                                                         │
-                                              ┌──────────┴──────────┐
-                                              │  Hive File Metastore  │
-                                              │ (file:///etc/trino/   │
-                                              │     metastore)        │
-                                              └──────────┬──────────┘
-                                                         │
-                                                         ▼
-                                                      Trino
-                                                 port 8090 (HTTP)
-                                                         │
-                                                         ▼
-                                                  Developer SQL Queries
-```
+![](../docs/assets/Trinopipeline.png)
 
 ---
 
