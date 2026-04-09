@@ -17,20 +17,7 @@
 ![CDC Pipeline Architecture: PostgreSQL → Debezium → Kafka → Schema Registry → S3 Sink → MinIO](docs/assets/architecture.png)
 
 **Full Data Flow**:
-```
-PostgreSQL  →  Debezium  →  Kafka  →  S3 Sink  →  MinIO (Avro)
-                                                         │
-                                                  Spark CDC Engine
-                                                  (mỗi 3 phút)
-                                                         │
-                                                         ▼
-                                                 MinIO (Parquet)
-                                                         │
-                                                         ▼
-                                                      Trino
-                                               (SQL Analytics — port 8090)
-```
-
+![](docs/assets/pipeline.png)
 ---
 
 ## 📚 Documentation
