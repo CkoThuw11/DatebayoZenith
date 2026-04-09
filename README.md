@@ -138,7 +138,7 @@ docker exec -it trino trino --file /init/create_tables.sql
 **Step 7 — Query data với Trino (sau khi Spark chạy xong lần đầu)**
 
 ```bash
-docker exec -it trino trino
+docker exec -it trino trino --server http://localhost:8090
 ```
 ```sql
 -- Sync partitions sau khi Spark ghi data
