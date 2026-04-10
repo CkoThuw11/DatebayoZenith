@@ -173,25 +173,24 @@ Each message value on Kafka follows the standard Debezium envelope structure:
 
 ```
 northwind-data-lake/                          ← Bucket
-└── topics/                                   ← S3 Sink default prefix
-    ├── northwind.public.orders/
-    │   └── year=2024/
-    │       └── month=01/
-    │           └── day=15/
-    │               ├── northwind.public.orders+0+0000000000.avro
-    │               └── northwind.public.orders+0+0000000050.avro
-    │
-    ├── northwind.public.order_details/
-    │   └── year=2024/
-    │       └── month=01/
-    │           └── day=15/
-    │               └── northwind.public.order_details+0+0000000000.avro
-    │
-    ├── northwind.public.products/
-    │   └── ...
-    │
-    └── northwind.public.customers/
-        └── ...
+├── topics/                                   ← S3 Sink default prefix (Avro)
+│   ├── northwind.public.orders/
+│   │   └── year=2026/
+│   │       └── month=04/
+│   │           └── day=09/
+│   │               ├── northwind.public.orders+0+0000000000.avro
+│   │               └── northwind.public.orders+0+0000000050.avro
+│   ├── northwind.public.order_details/
+│   ├── northwind.public.products/
+│   └── northwind.public.customers/
+│
+└── parquet/                                  ← Spark output prefix (Parquet)
+    ├── orders/
+    │   └── year=2026/month=04/day=09/
+    │       └── part-00000-*.snappy.parquet
+    ├── order_details/
+    ├── products/
+    └── customers/
 ```
 
 ### File Naming Convention
@@ -206,7 +205,64 @@ northwind-data-lake/                          ← Bucket
 
 ---
 
-## 4. Schema Evolution Policy
+## 4. Parquet Layer Contract (Spark → Trino)
+
+This section defines the interface between the **Spark CDC Engine** (writer) and **Trino** (reader). Both components must adhere to these constraints.
+
+### Output Path
+
+```
+s3a://northwind-data-lake/parquet/<table>/year=YYYY/month=MM/day=DD/
+```
+
+### File Format Requirements
+
+| Property | Value | Notes |
+|---|---|---|
+| Format | Parquet | Columnar, efficient for analytics |
+| Compression | Snappy | Balanced between speed and size |
+| Partitioning | Hive-style: `year=X/month=XX/day=XX` | Enables partition pruning in Trino |
+| Deduplication | One row per primary key | Last-Write-Wins by `cdc_ts_ms DESC` |
+
+### Required Columns (all tables)
+
+In addition to all source table columns, every Parquet file **must** include:
+
+| Column | Type | Description |
+|---|---|---|
+| `cdc_op` | VARCHAR | CDC event type: `c` create, `u` update, `r` read/snapshot |
+| `cdc_ts_ms` | BIGINT | Debezium timestamp in milliseconds |
+| `year` | VARCHAR | Partition column (UTC, zero-padded) |
+| `month` | VARCHAR | Partition column (UTC, zero-padded) |
+| `day` | VARCHAR | Partition column (UTC, zero-padded) |
+
+### Critical Type Mappings
+
+These types are **intentionally different** from the Postgres source types to avoid issues with Spark/Trino serialization:
+
+| Column | Postgres | Parquet / Trino | Reason |
+|---|---|---|---|
+| `order_date`, `required_date`, `shipped_date` | `DATE` | VARCHAR | Avro DATE is serialized as integer epoch days; stored as ISO string to avoid timezone errors |
+| `quantity` (order_details) | `SMALLINT` | INTEGER | Python `int` serializes to INT64 in Parquet |
+| `units_in_stock`, `units_on_order`, `reorder_level` | `SMALLINT` | INTEGER | Same reason |
+| `discontinued` | `BOOLEAN` | INTEGER | Stored as 0 or 1 |
+
+### Post-Write Sync Requirement
+
+> ⚠️ **Important**: After every Spark run, the following commands **must** be executed in Trino to make new partitions visible:
+
+```sql
+CALL hive.system.sync_partition_metadata('northwind', 'orders',        'FULL');
+CALL hive.system.sync_partition_metadata('northwind', 'order_details', 'FULL');
+CALL hive.system.sync_partition_metadata('northwind', 'products',      'FULL');
+CALL hive.system.sync_partition_metadata('northwind', 'customers',     'FULL');
+```
+
+This is required because the Hive file metastore does not automatically detect new Hive-style partition directories.
+
+---
+
+## 5. Schema Evolution Policy
 
 | Change Type | Allowed? | Notes |
 |---|---|---|
@@ -218,7 +274,7 @@ northwind-data-lake/                          ← Bucket
 
 ---
 
-## 5. Contract Change Process
+## 6. Contract Change Process
 
 When a contract needs to be changed:
 
