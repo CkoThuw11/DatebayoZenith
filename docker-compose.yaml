@@ -145,7 +145,6 @@ services:
   spark-cdc:
     build: ./spark
     container_name: spark-cdc
-    # FIX W2: Đợi MinIO healthy (IAM sẵn sàng) trước khi Spark start
     depends_on:
       minio:
         condition: service_healthy
@@ -154,41 +153,49 @@ services:
       - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
       - MINIO_ENDPOINT=http://minio:9000
       - S3_BUCKET=northwind-data-lake
-      - SLEEP_INTERVAL=180        # 3 phút — nằm trong yêu cầu 3-5 phút
+      - SLEEP_INTERVAL=60
     restart: on-failure
 
-  # ──────────────────────────────────────────────────────────────
-  # TRINO — SQL Query Engine cho Parquet Data Lake
-  # Reads từ s3a://northwind-data-lake/parquet/{table}/
-  # UI: http://localhost:8090
-  # ──────────────────────────────────────────────────────────────
-  trino:
-    image: trinodb/trino:435
-    hostname: trino
-    container_name: trino
+  metastore-db:
+    image: postgres:15
+    container_name: metastore-db
+    environment:
+      POSTGRES_DB: metastore
+      POSTGRES_USER: hive
+      POSTGRES_PASSWORD: hive
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hive -d metastore"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  hive-metastore:
+    build: ./hive
+    container_name: hive-metastore
     depends_on:
-      minio:
+      metastore-db:
         condition: service_healthy
     environment:
-      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
-      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
-    volumes:
-      - ./trino/etc/config.properties:/etc/trino/config.properties
-      - ./trino/etc/jvm.config:/etc/trino/jvm.config
-      - ./trino/etc/log.properties:/etc/trino/log.properties
-      - ./trino/etc/node.properties:/etc/trino/node.properties
-      - ./trino/etc/catalog/hive.properties:/etc/trino/catalog/hive.properties
-      - ./trino/init:/init
-      - trino_metastore:/etc/trino/metastore
+      SERVICE_NAME: metastore
+      HIVE_METASTORE_DB_TYPE: postgres
+      HIVE_METASTORE_USER: hive
+      HIVE_METASTORE_PASSWORD: hive
+      HIVE_METASTORE_DB_HOST: metastore-db
     ports:
-      - "8090:8090"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8090/v1/info"]
-      interval: 15s
-      timeout: 5s
-      retries: 10
+      - "9083:9083"
 
+  trino:
+    image: trinodb/trino:435
+    container_name: trino
+    ports:
+      - "8088:8080"
+    volumes:
+      - ./trino/etc:/etc/trino
+    depends_on:
+      - hive-metastore
+      - minio
 volumes:
   postgres_data:
   minio-data:
-  trino_metastore:
