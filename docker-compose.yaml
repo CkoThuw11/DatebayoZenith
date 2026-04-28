@@ -91,7 +91,6 @@ services:
     depends_on:
       - kafka
 
-  # FIX W2: Added healthcheck — Spark và Trino phải đợi MinIO IAM sẵn sàng
   minio:
     image: minio/minio
     hostname: minio
@@ -106,7 +105,7 @@ services:
       - "9000:9000"
       - "9001:9001"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: [ "CMD", "curl", "-f", "http://localhost:9000/minio/health/live" ]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -153,49 +152,79 @@ services:
       - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
       - MINIO_ENDPOINT=http://minio:9000
       - S3_BUCKET=northwind-data-lake
-      - SLEEP_INTERVAL=60
+      - SLEEP_INTERVAL=180
     restart: on-failure
-
-  metastore-db:
-    image: postgres:15
-    container_name: metastore-db
-    environment:
-      POSTGRES_DB: metastore
-      POSTGRES_USER: hive
-      POSTGRES_PASSWORD: hive
-    ports:
-      - "5433:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U hive -d metastore"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  hive-metastore:
-    build: ./hive
-    container_name: hive-metastore
-    depends_on:
-      metastore-db:
-        condition: service_healthy
-    environment:
-      SERVICE_NAME: metastore
-      HIVE_METASTORE_DB_TYPE: postgres
-      HIVE_METASTORE_USER: hive
-      HIVE_METASTORE_PASSWORD: hive
-      HIVE_METASTORE_DB_HOST: metastore-db
-    ports:
-      - "9083:9083"
 
   trino:
     image: trinodb/trino:435
+    hostname: trino
     container_name: trino
-    ports:
-      - "8088:8080"
-    volumes:
-      - ./trino/etc:/etc/trino
     depends_on:
-      - hive-metastore
-      - minio
+      minio:
+        condition: service_healthy
+    environment:
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - ./trino/etc/config.properties:/etc/trino/config.properties
+      - ./trino/etc/jvm.config:/etc/trino/jvm.config
+      - ./trino/etc/log.properties:/etc/trino/log.properties
+      - ./trino/etc/node.properties:/etc/trino/node.properties
+      - ./trino/etc/catalog/hive.properties:/etc/trino/catalog/hive.properties
+      - ./trino/init:/init
+      - trino_metastore:/etc/trino/metastore
+    ports:
+      - "8090:8090"
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8090/v1/info" ]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  # ──────────────────────────────────────────────────────────────
+  # MONITORING — Prometheus, Pushgateway, Grafana
+  # ──────────────────────────────────────────────────────────────
+  pushgateway:
+    image: prom/pushgateway:v1.8.0
+    hostname: pushgateway
+    container_name: pushgateway
+    ports:
+      - "9091:9091"
+
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    hostname: prometheus
+    container_name: prometheus
+    depends_on:
+      - pushgateway
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    hostname: grafana
+    container_name: grafana
+    depends_on:
+      - prometheus
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - grafana_data:/var/lib/grafana
+
 volumes:
   postgres_data:
   minio-data:
+  trino_metastore:
+  prometheus_data:
+  grafana_data:
