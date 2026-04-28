@@ -23,7 +23,7 @@ while true; do
 
   "${SPARK_SUBMIT}" \
     --master "local[2]" \
-    --jars "/opt/spark/extra-jars/spark-avro.jar,/opt/spark/extra-jars/hadoop-aws.jar,/opt/spark/extra-jars/aws-java-sdk-bundle.jar" \
+    --jars "/opt/spark/extra-jars/spark-avro.jar,/opt/spark/extra-jars/hadoop-aws.jar,/opt/spark/extra-jars/aws-java-sdk-bundle.jar,/opt/spark/extra-jars/deequ.jar" \
     --conf "spark.hadoop.fs.s3a.path.style.access=true" \
     --conf "spark.driver.memory=1g" \
     --conf "spark.executor.memory=1g" \

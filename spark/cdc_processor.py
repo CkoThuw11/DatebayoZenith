@@ -5,6 +5,15 @@ Reads Debezium CDC Avro files from MinIO (S3) written by the Kafka S3 Sink conne
 deduplicates records using last-write-wins per primary key, and writes clean Parquet
 files back to MinIO under the `parquet/` prefix — partitioned by year/month/day.
 
+Data Quality: After each Avro→Parquet cycle, Amazon Deequ checks are run per table:
+  • Null PK check        — no primary key column may be NULL
+  • Uniqueness PK check  — no duplicate primary keys
+  • Valid cdc_op check   — cdc_op must be one of {c, u, r}
+  • Non-empty check      — table must have at least 1 row
+
+Alerting: On check failure or unhandled exception, alert.py fires a PagerDuty incident.
+          Graceful degradation when PAGERDUTY_ROUTING_KEY is not set.
+
 Runs as a batch on a schedule (called from entrypoint.sh every N minutes).
 """
 
@@ -21,6 +30,12 @@ from pyspark.sql.window import Window
 # Tích hợp Prometheus và Kafka Client cho Monitoring
 from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
 from kafka import KafkaConsumer, TopicPartition
+
+# Data Quality — Native PySpark (pydeequ không tương thích Spark 3.5.x)
+from dataclasses import dataclass
+
+# PagerDuty Alerting
+import alert
 
 logging.basicConfig(
     level=logging.INFO,
@@ -55,14 +70,15 @@ TOPIC_PREFIX = "northwind.public"
 # Prometheus Metrics Setup
 # ---------------------------------------------------------------------------
 registry = CollectorRegistry()
-g_rows = Gauge('cdc_rows_written_total', 'Deduplicated rows written', ['table'], registry=registry)
+g_rows     = Gauge('cdc_rows_written_total', 'Deduplicated rows written', ['table'], registry=registry)
 g_duration = Gauge('cdc_processing_duration_seconds', 'Processing duration', ['table'], registry=registry)
-g_timestamp = Gauge('cdc_last_run_timestamp_seconds', 'Last run timestamp', ['table'], registry=registry)
-g_kafka_lag = Gauge('cdc_kafka_consumer_lag', 'Consumer lag per topic/partition', ['table', 'partition'], registry=registry)
+g_timestamp= Gauge('cdc_last_run_timestamp_seconds', 'Last run timestamp', ['table'], registry=registry)
+g_kafka_lag= Gauge('cdc_kafka_consumer_lag', 'Consumer lag per topic/partition', ['table', 'partition'], registry=registry)
+g_dq_status= Gauge('cdc_dq_check_status', 'Data quality check status (1=pass, 0=fail)', ['table', 'check'], registry=registry)
 
 
 def build_spark_session() -> SparkSession:
-    """Build and configure a SparkSession with S3A / MinIO support."""
+    """Build and configure a SparkSession with S3A / MinIO support + Deequ."""
     spark = (
         SparkSession.builder.appName("cdc-avro-to-parquet")
         .config("spark.hadoop.fs.s3a.endpoint", MINIO_ENDPOINT)
@@ -74,6 +90,8 @@ def build_spark_session() -> SparkSession:
                 "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider")
         .config("spark.sql.extensions", "org.apache.spark.sql.avro.AvroExtensions")
         .config("spark.sql.shuffle.partitions", "4")
+        # Deequ JAR đã được pre-fetch trong Docker image (/opt/spark/extra-jars/deequ.jar)
+        # và truyền qua --jars trong entrypoint.sh → không cần tải từ Maven lúc runtime
         .getOrCreate()
     )
     spark.sparkContext.setLogLevel("WARN")
@@ -99,42 +117,165 @@ def collect_kafka_lag():
             group_id=KAFKA_GROUP_ID,
             enable_auto_commit=False
         )
-        
+
         for table_name in TABLE_CONFIG.keys():
             topic = f"{TOPIC_PREFIX}.{table_name}"
             partitions = consumer.partitions_for_topic(topic)
             if not partitions:
                 continue
-                
+
             tps = [TopicPartition(topic, p) for p in partitions]
             end_offsets = consumer.end_offsets(tps)
-            
+
             for tp in tps:
                 committed = consumer.committed(tp)
                 end_offset = end_offsets.get(tp, 0)
-                
+
                 # Nếu chưa commit bao giờ, tính lag từ đầu (end_offset)
                 lag = max(0, end_offset - (committed or 0))
-                
+
                 g_kafka_lag.labels(table=table_name, partition=str(tp.partition)).set(lag)
                 logger.info("Kafka Lag cho %s (partition %d): %d", topic, tp.partition, lag)
-        
+
         consumer.close()
     except Exception as e:
         logger.warning("Không thể lấy Kafka Lag. Kiểm tra lại Kafka broker. Chi tiết lỗi: %s", e)
+
+
+@dataclass
+class DQResult:
+    check_name: str   # vd: "null_pk:order_id"
+    passed: bool
+    message: str
+    error_type: str   # dùng cho PagerDuty dedup_key
+
+
+def run_dq_checks(
+    spark: SparkSession,
+    df: DataFrame,
+    table_name: str,
+    pk_cols: List[str],
+) -> bool:
+    """
+    Native PySpark Data Quality checks — thay thế pydeequ (không tương thích Spark 3.5).
+
+    Checks thực hiện cho mỗi table:
+      1. Non-empty       — hasSize: >= 1 row
+      2. Null PK         — isComplete: không có PK nào NULL
+      3. Uniqueness PK   — isUnique: không có PK trùng lặp
+      4. Valid cdc_op    — isContainedIn: cdc_op ∈ {c, u, r}
+
+    Returns:
+        True nếu TẤT CẢ checks pass, False nếu có bất kỳ check nào fail.
+    """
+
+    logger.info("[DQ] Running data quality checks for table '%s'...", table_name)
+    results: List[DQResult] = []
+
+    # ── Check 1: Non-empty ────────────────────────────────────────────────────
+    total_rows = df.count()
+    if total_rows >= 1:
+        results.append(DQResult("non_empty", True, f"{total_rows} rows", "empty_table"))
+    else:
+        results.append(DQResult(
+            "non_empty", False,
+            f"Table '{table_name}' is empty (0 rows)",
+            "empty_table",
+        ))
+
+    # ── Checks 2 & 3: Null PK + Uniqueness per PK column ─────────────────────
+    for pk_col in pk_cols:
+        null_count = df.filter(F.col(pk_col).isNull()).count()
+        if null_count == 0:
+            results.append(DQResult(f"null_pk:{pk_col}", True, "no NULLs", "null_pk"))
+        else:
+            results.append(DQResult(
+                f"null_pk:{pk_col}", False,
+                f"Column '{pk_col}' has {null_count} NULL value(s)",
+                "null_pk",
+            ))
+
+        distinct_count = df.select(pk_col).distinct().count()
+        dup_count = total_rows - distinct_count
+        if dup_count == 0:
+            results.append(DQResult(f"unique_pk:{pk_col}", True, "no duplicates", "duplicate_pk"))
+        else:
+            results.append(DQResult(
+                f"unique_pk:{pk_col}", False,
+                f"Column '{pk_col}' has {dup_count} duplicate value(s)",
+                "duplicate_pk",
+            ))
+
+    # ── Check 4: Valid cdc_op ─────────────────────────────────────────────────
+    if "cdc_op" in df.columns:
+        valid_ops = ["c", "u", "r"]
+        invalid_count = df.filter(~F.col("cdc_op").isin(valid_ops)).count()
+        if invalid_count == 0:
+            results.append(DQResult("valid_cdc_op", True, "all ops valid", "invalid_cdc_op"))
+        else:
+            bad_ops = (
+                df.filter(~F.col("cdc_op").isin(valid_ops))
+                  .select("cdc_op").distinct()
+                  .rdd.flatMap(lambda r: [r[0]]).collect()
+            )
+            results.append(DQResult(
+                "valid_cdc_op", False,
+                f"{invalid_count} row(s) with invalid cdc_op: {bad_ops}",
+                "invalid_cdc_op",
+            ))
+
+    # ── Tổng hợp & emit Prometheus + PagerDuty ───────────────────────────────
+    all_passed = True
+    for r in results:
+        g_dq_status.labels(table=table_name, check=r.check_name).set(1 if r.passed else 0)
+        if r.passed:
+            logger.info("[DQ] ✓ PASS | table=%s | check=%s | %s",
+                        table_name, r.check_name, r.message)
+        else:
+            all_passed = False
+            logger.error("[DQ] ✗ FAIL | table=%s | check=%s | %s",
+                         table_name, r.check_name, r.message)
+            alert.send_alert(
+                summary=f"[CDC DQ] {table_name}: {r.check_name} FAILED",
+                severity="critical",
+                table=table_name,
+                error_type=r.error_type,
+                details={"check": r.check_name, "message": r.message},
+            )
+
+    if all_passed:
+        logger.info("[DQ] ✓ ALL CHECKS PASSED for table '%s' (%d rows)", table_name, total_rows)
+    else:
+        logger.error("[DQ] ✗ SOME CHECKS FAILED for table '%s' — see above.", table_name)
+    return all_passed
+
+
+def _classify_check_error(check_name: str, pk_cols: List[str]) -> str:
+    """Map tên check → error_type string cho PagerDuty dedup_key."""
+    name_lower = check_name.lower()
+    if "null_pk" in name_lower:
+        return "null_pk"
+    if "unique_pk" in name_lower:
+        return "duplicate_pk"
+    if "cdc_op" in name_lower:
+        return "invalid_cdc_op"
+    if "non_empty" in name_lower:
+        return "empty_table"
+    return "dq_check_failed"
 
 
 def process_table(spark: SparkSession, table_name: str, pk_cols: List[str]) -> None:
     """
     Read Avro files for a single table, extract latest row per PK,
     add partition columns, and write partitioned Parquet for Trino to query.
+    After writing, run Deequ data quality checks and alert on failure.
     """
     source_path = get_source_path(table_name)
     sink_path   = get_sink_path(table_name)
 
     logger.info("Processing table '%s' from %s", table_name, source_path)
-    
-    start_time = time.time()
+
+    start_time   = time.time()
     rows_written = 0
 
     try:
@@ -219,6 +360,13 @@ def process_table(spark: SparkSession, table_name: str, pk_cols: List[str]) -> N
             table_name, sink_path,
             now_utc.year, str(now_utc.month).zfill(2), str(now_utc.day).zfill(2),
         )
+
+        # ------------------------------------------------------------------
+        # 6. [NEW] Deequ Data Quality Checks — chạy sau khi write Parquet
+        #    Dùng df_deduped (bỏ partition cols để check sạch hơn)
+        # ------------------------------------------------------------------
+        run_dq_checks(spark, df_deduped, table_name, pk_cols)
+
     finally:
         # Cập nhật Metrics dù thành công hay rỗng (để Grafana không bị đứt quãng dữ liệu)
         duration = time.time() - start_time
@@ -233,6 +381,7 @@ def main() -> None:
     logger.info("Source bucket : %s", BUCKET)
     logger.info("MinIO endpoint: %s", MINIO_ENDPOINT)
     logger.info("Sink prefix   : parquet/")
+    logger.info("PagerDuty key : %s", "configured" if alert.PAGERDUTY_ROUTING_KEY else "NOT SET (graceful degradation)")
     logger.info("=" * 60)
 
     # Đo độ trễ Kafka trước khi bắt đầu xử lý S3
@@ -248,9 +397,17 @@ def main() -> None:
                 "Unhandled error processing table '%s': %s",
                 table_name, e, exc_info=True,
             )
+            # Gửi PagerDuty alert cho unhandled exception
+            alert.send_alert(
+                summary=f"[CDC Pipeline] Unhandled exception in table '{table_name}'",
+                severity="critical",
+                table=table_name,
+                error_type="unhandled_exception",
+                details={"exception": str(e)},
+            )
 
     spark.stop()
-    
+
     # Đẩy toàn bộ dữ liệu đo đạc (Metrics) sang Pushgateway
     try:
         push_to_gateway(PUSHGATEWAY_URL, job='cdc_processor', registry=registry)
