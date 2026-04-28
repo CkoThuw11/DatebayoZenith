@@ -26,12 +26,14 @@ from typing import List
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
+from pydeequ.checks import Check, CheckLevel
+from pydeequ.verification import VerificationSuite, VerificationResult
 
 # Tích hợp Prometheus và Kafka Client cho Monitoring
 from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
 from kafka import KafkaConsumer, TopicPartition
 
-# Data Quality — Native PySpark (pydeequ không tương thích Spark 3.5.x)
+# Data Quality
 from dataclasses import dataclass
 
 # PagerDuty Alerting
@@ -150,6 +152,50 @@ class DQResult:
     error_type: str   # dùng cho PagerDuty dedup_key
 
 
+def _verification_message(spark: SparkSession, verification_result) -> str:
+    """Extract failure message from pydeequ VerificationResult."""
+    try:
+        result_df = VerificationResult.checkResultsAsDataFrame(spark, verification_result)
+        failed_rows = (
+            result_df.filter(F.col("constraint_status") != "Success")
+            .select("constraint", "constraint_message")
+            .collect()
+        )
+        if not failed_rows:
+            return "all constraints passed"
+        details = []
+        for row in failed_rows:
+            constraint = row["constraint"] or "unknown_constraint"
+            message = row["constraint_message"] or "no failure detail"
+            details.append(f"{constraint}: {message}")
+        return "; ".join(details)
+    except Exception as exc:
+        return f"unable to parse pydeequ result details: {exc}"
+
+
+def _run_pydeequ_check(
+    spark: SparkSession,
+    df: DataFrame,
+    check_name: str,
+    error_type: str,
+    check: Check,
+) -> DQResult:
+    """Run a single pydeequ check and normalize to DQResult."""
+    verification_result = (
+        VerificationSuite(spark)
+        .onData(df)
+        .addCheck(check)
+        .run()
+    )
+    passed = str(verification_result.status) == "Success"
+    return DQResult(
+        check_name=check_name,
+        passed=passed,
+        message="all constraints passed" if passed else _verification_message(spark, verification_result),
+        error_type=error_type,
+    )
+
+
 def run_dq_checks(
     spark: SparkSession,
     df: DataFrame,
@@ -157,12 +203,12 @@ def run_dq_checks(
     pk_cols: List[str],
 ) -> bool:
     """
-    Native PySpark Data Quality checks — thay thế pydeequ (không tương thích Spark 3.5).
+    Amazon Deequ (pydeequ) data quality checks.
 
     Checks thực hiện cho mỗi table:
       1. Non-empty       — hasSize: >= 1 row
       2. Null PK         — isComplete: không có PK nào NULL
-      3. Uniqueness PK   — isUnique: không có PK trùng lặp
+      3. Uniqueness PK   — hasUniqueness: không có PK trùng lặp (hỗ trợ composite key)
       4. Valid cdc_op    — isContainedIn: cdc_op ∈ {c, u, r}
 
     Returns:
@@ -173,56 +219,35 @@ def run_dq_checks(
     results: List[DQResult] = []
 
     # ── Check 1: Non-empty ────────────────────────────────────────────────────
-    total_rows = df.count()
-    if total_rows >= 1:
-        results.append(DQResult("non_empty", True, f"{total_rows} rows", "empty_table"))
-    else:
-        results.append(DQResult(
-            "non_empty", False,
-            f"Table '{table_name}' is empty (0 rows)",
-            "empty_table",
-        ))
+    non_empty_check = (
+        Check(spark, CheckLevel.Error, f"{table_name}:non_empty")
+        .hasSize(lambda size: size >= 1)
+    )
+    results.append(_run_pydeequ_check(spark, df, "non_empty", "empty_table", non_empty_check))
 
-    # ── Checks 2 & 3: Null PK + Uniqueness per PK column ─────────────────────
+    # ── Checks 2: Null PK per column ──────────────────────────────────────────
     for pk_col in pk_cols:
-        null_count = df.filter(F.col(pk_col).isNull()).count()
-        if null_count == 0:
-            results.append(DQResult(f"null_pk:{pk_col}", True, "no NULLs", "null_pk"))
-        else:
-            results.append(DQResult(
-                f"null_pk:{pk_col}", False,
-                f"Column '{pk_col}' has {null_count} NULL value(s)",
-                "null_pk",
-            ))
+        null_pk_check = (
+            Check(spark, CheckLevel.Error, f"{table_name}:null_pk:{pk_col}")
+            .isComplete(pk_col)
+        )
+        results.append(_run_pydeequ_check(spark, df, f"null_pk:{pk_col}", "null_pk", null_pk_check))
 
-        distinct_count = df.select(pk_col).distinct().count()
-        dup_count = total_rows - distinct_count
-        if dup_count == 0:
-            results.append(DQResult(f"unique_pk:{pk_col}", True, "no duplicates", "duplicate_pk"))
-        else:
-            results.append(DQResult(
-                f"unique_pk:{pk_col}", False,
-                f"Column '{pk_col}' has {dup_count} duplicate value(s)",
-                "duplicate_pk",
-            ))
+    # ── Check 3: Uniqueness PK (composite key aware) ─────────────────────────
+    unique_pk_check = (
+        Check(spark, CheckLevel.Error, f"{table_name}:unique_pk")
+        .hasUniqueness(pk_cols, lambda value: value == 1.0)
+    )
+    unique_label = "unique_pk:" + "+".join(pk_cols)
+    results.append(_run_pydeequ_check(spark, df, unique_label, "duplicate_pk", unique_pk_check))
 
     # ── Check 4: Valid cdc_op ─────────────────────────────────────────────────
     if "cdc_op" in df.columns:
-        valid_ops = ["c", "u", "r"]
-        invalid_count = df.filter(~F.col("cdc_op").isin(valid_ops)).count()
-        if invalid_count == 0:
-            results.append(DQResult("valid_cdc_op", True, "all ops valid", "invalid_cdc_op"))
-        else:
-            bad_ops = (
-                df.filter(~F.col("cdc_op").isin(valid_ops))
-                  .select("cdc_op").distinct()
-                  .rdd.flatMap(lambda r: [r[0]]).collect()
-            )
-            results.append(DQResult(
-                "valid_cdc_op", False,
-                f"{invalid_count} row(s) with invalid cdc_op: {bad_ops}",
-                "invalid_cdc_op",
-            ))
+        valid_cdc_check = (
+            Check(spark, CheckLevel.Error, f"{table_name}:valid_cdc_op")
+            .isContainedIn("cdc_op", ["c", "u", "r"])
+        )
+        results.append(_run_pydeequ_check(spark, df, "valid_cdc_op", "invalid_cdc_op", valid_cdc_check))
 
     # ── Tổng hợp & emit Prometheus + PagerDuty ───────────────────────────────
     all_passed = True
@@ -244,7 +269,7 @@ def run_dq_checks(
             )
 
     if all_passed:
-        logger.info("[DQ] ✓ ALL CHECKS PASSED for table '%s' (%d rows)", table_name, total_rows)
+        logger.info("[DQ] ✓ ALL CHECKS PASSED for table '%s'", table_name)
     else:
         logger.error("[DQ] ✗ SOME CHECKS FAILED for table '%s' — see above.", table_name)
     return all_passed
