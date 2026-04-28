@@ -1,0 +1,142 @@
+{
+    "title": "CDC Pipeline Monitoring",
+    "refresh": "10s",
+    "schemaVersion": 38,
+    "timezone": "browser",
+    "panels": [
+        {
+            "type": "timeseries",
+            "title": "1. Rows Written per Table",
+            "gridPos": {
+                "h": 9,
+                "w": 12,
+                "x": 0,
+                "y": 0
+            },
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "Prometheus"
+                    },
+                    "expr": "cdc_rows_written_total",
+                    "legendFormat": "{{table}}"
+                }
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "custom": {
+                        "drawStyle": "bars",
+                        "fillOpacity": 80
+                    },
+                    "unit": "short"
+                }
+            }
+        },
+        {
+            "type": "timeseries",
+            "title": "2. Processing Duration (Seconds)",
+            "gridPos": {
+                "h": 9,
+                "w": 12,
+                "x": 12,
+                "y": 0
+            },
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "Prometheus"
+                    },
+                    "expr": "cdc_processing_duration_seconds",
+                    "legendFormat": "{{table}}"
+                }
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "custom": {
+                        "drawStyle": "line",
+                        "lineWidth": 2
+                    },
+                    "unit": "s"
+                }
+            }
+        },
+        {
+            "type": "stat",
+            "title": "3. Time Since Last Run",
+            "description": "Thời gian trôi qua kể từ lần Spark chạy xong gần nhất",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 9
+            },
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "Prometheus"
+                    },
+                    "expr": "time() - cdc_last_run_timestamp_seconds",
+                    "legendFormat": "{{table}}"
+                }
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "s",
+                    "color": {
+                        "mode": "thresholds"
+                    },
+                    "thresholds": {
+                        "mode": "absolute",
+                        "steps": [
+                            {
+                                "color": "green",
+                                "value": null
+                            },
+                            {
+                                "color": "orange",
+                                "value": 300
+                            },
+                            {
+                                "color": "red",
+                                "value": 600
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+        {
+            "type": "timeseries",
+            "title": "4. Kafka Consumer Lag",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 9
+            },
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "Prometheus"
+                    },
+                    "expr": "cdc_kafka_consumer_lag",
+                    "legendFormat": "{{table}} (partition: {{partition}})"
+                }
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "custom": {
+                        "drawStyle": "line",
+                        "fillOpacity": 20,
+                        "lineWidth": 2
+                    },
+                    "unit": "short"
+                }
+            }
+        }
+    ]
+}
