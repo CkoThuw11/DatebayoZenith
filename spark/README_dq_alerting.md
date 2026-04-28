@@ -42,18 +42,18 @@ Avro files (MinIO)
 
 ## Data Quality Checks (`run_dq_checks`)
 
-Implemented in **native PySpark** (compatible with Spark 3.5.x, không dùng pydeequ runtime).
+Implemented in **native PySpark** (compatible with Spark 3.5.x; pydeequ is not used at runtime).
 
-Bốn checks chạy **per table** sau mỗi chu kỳ Avro→Parquet:
+Four checks run **per table** after every Avro→Parquet cycle:
 
-| # | Check | Metric label | Điều kiện |
+| # | Check | Metric label | Condition |
 |---|---|---|---|
-| 1 | **Non-empty** | `non_empty` | Table phải có ≥ 1 row |
-| 2 | **Null PK** | `null_pk:<col>` | Không có PK column nào là NULL |
-| 3 | **Uniqueness PK** | `unique_pk:<col>` | Không có PK trùng lặp |
-| 4 | **Valid `cdc_op`** | `valid_cdc_op` | `cdc_op` ∈ `{c, u, r}` — deletes (`d`) bị loại |
+| 1 | **Non-empty** | `non_empty` | Table must have ≥ 1 row |
+| 2 | **Null PK** | `null_pk:<col>` | No primary-key column may be NULL |
+| 3 | **Uniqueness PK** | `unique_pk:<col>` | No duplicate primary-key values |
+| 4 | **Valid `cdc_op`** | `valid_cdc_op` | `cdc_op` ∈ `{c, u, r}` — deletes (`d`) are excluded |
 
-Mỗi kết quả check được emit ra Prometheus:
+Each check result is emitted as a Prometheus gauge:
 
 ```
 cdc_dq_check_status{table="orders", check="null_pk:order_id"} 1.0   # 1=pass, 0=fail
@@ -61,7 +61,7 @@ cdc_dq_check_status{table="orders", check="null_pk:order_id"} 1.0   # 1=pass, 0=
 
 ### Composite PK support
 
-Table có composite PK (`order_details`: `order_id + product_id`) sẽ tự động chạy null + uniqueness check cho từng cột.
+Tables with composite primary keys (`order_details`: `order_id + product_id`) automatically run null and uniqueness checks for each individual column.
 
 ---
 
@@ -69,63 +69,63 @@ Table có composite PK (`order_details`: `order_id + product_id`) sẽ tự đ�
 
 ### `send_alert(summary, severity, table, error_type, details)`
 
-Fires a **trigger** event tới PagerDuty Events API v2.
+Fires a **trigger** event to the PagerDuty Events API v2.
 
 | Field | Value |
 |---|---|
 | Endpoint | `https://events.pagerduty.com/v2/enqueue` |
-| `dedup_key` | `cdc-{table}-{error_type}` — tránh tạo duplicate incidents cho cùng table + lỗi |
-| `severity` | `critical` cho DQ failures và unhandled exceptions |
-| `custom_details` | `table`, `error_type`, `timestamp`, `source`, context cụ thể của check |
+| `dedup_key` | `cdc-{table}-{error_type}` — prevents duplicate incidents for the same table + error |
+| `severity` | `critical` for DQ failures and unhandled exceptions |
+| `custom_details` | `table`, `error_type`, `timestamp`, `source`, check-specific context |
 | Timeout | 10 s |
 
 ### `resolve_alert(table, error_type)`
 
-Gửi **resolve** event với cùng `dedup_key` để tự động đóng incident sau khi vấn đề được khắc phục.
+Sends a **resolve** event using the same `dedup_key` to automatically close the incident once the issue is fixed.
 
 ### Graceful degradation
 
-Nếu `PAGERDUTY_ROUTING_KEY` chưa được set, `send_alert` chỉ log `WARNING` và return `False` — **pipeline vẫn tiếp tục chạy**, không crash.
+If `PAGERDUTY_ROUTING_KEY` is not set, `send_alert` logs a `WARNING` and returns `False` — **the pipeline keeps running without crashing**.
 
 ---
 
 ## Grafana Alert Rules (`alerting.yaml`)
 
-Được provisioned tự động khi Grafana khởi động.
+Provisioned automatically on Grafana startup via the provisioning directory.
 
 ### Contact Point
 
 **PagerDuty CDC Alerts** → `https://events.eu.pagerduty.com/v2/enqueue`  
-Integration key lấy từ `${PAGERDUTY_ROUTING_KEY}` env var.
+Integration key injected from the `${PAGERDUTY_ROUTING_KEY}` environment variable.
 
-### Alert Rules (group: `CDC Data Quality & Kafka Lag`, evaluate mỗi 1 phút)
+### Alert Rules (group: `CDC Data Quality & Kafka Lag`, evaluated every 1 minute)
 
-| Rule | Điều kiện | Fire sau | Severity |
+| Rule | Condition | Fire after | Severity |
 |---|---|---|---|
-| **Kafka Consumer Lag Too High** | `cdc_kafka_consumer_lag > 1000` messages | 1 min liên tục | critical |
-| **Spark Processor Not Running** | `time() - cdc_last_run_timestamp_seconds > 600` (10 phút) | 2 min liên tục | critical |
+| **Kafka Consumer Lag Too High** | `cdc_kafka_consumer_lag > 1000` messages | 1 min sustained | critical |
+| **Spark Processor Not Running** | `time() - cdc_last_run_timestamp_seconds > 600` (10 min) | 2 min sustained | critical |
 
-Notification policy: group by `alertname + table`, wait 30s, repeat mỗi 4h.
+Notification policy: group by `alertname + table`, 30 s wait, repeat every 4 h.
 
 ---
 
 ## Configuration
 
-### Thêm PagerDuty Integration Key vào `.env`
+### Add your PagerDuty Integration Key to `.env`
 
 ```env
 # PagerDuty Events API v2 — Integration Key
-# Lấy tại: PagerDuty → Services → <service> → Integrations → Add integration → Events API v2
+# Obtain from: PagerDuty → Services → <service> → Integrations → Add integration → Events API v2
 PAGERDUTY_ROUTING_KEY=your_32char_key_here
 ```
 
-> Để trống → chạy ở chế độ **graceful degradation** (DQ checks vẫn chạy, alerts chỉ ghi log).
+> Leave blank to run in **graceful degradation** mode (DQ checks still run; alerts are logged only).
 
 ---
 
 ## Running the Test Suite
 
-Test end-to-end (`test_dq_alert.py`) gồm 5 scenarios, chạy trong container:
+The end-to-end test (`test_dq_alert.py`) covers 5 scenarios and runs inside the container:
 
 ```powershell
 docker exec spark-cdc /opt/spark/bin/spark-submit `
@@ -134,11 +134,11 @@ docker exec spark-cdc /opt/spark/bin/spark-submit `
   /app/test_dq_alert.py
 ```
 
-| Scenario | Input | Kết quả mong đợi |
+| Scenario | Input | Expected result |
 |---|---|---|
-| 1 — Good data | 3 valid rows | ALL PASS, không alert |
-| 2 — NULL PK | `order_id = NULL` ở 1 row | `null_pk` FAIL + PagerDuty alert |
-| 3 — Duplicate PK | 2 rows cùng `order_id` | `unique_pk` FAIL + PagerDuty alert |
+| 1 — Good data | 3 valid rows | ALL PASS, no alert |
+| 2 — NULL PK | `order_id = NULL` in one row | `null_pk` FAIL + PagerDuty alert |
+| 3 — Duplicate PK | Two rows with same `order_id` | `unique_pk` FAIL + PagerDuty alert |
 | 4 — Invalid `cdc_op` | `cdc_op = 'd'` | `valid_cdc_op` FAIL + PagerDuty alert |
 | 5 — Empty table | 0 rows | `non_empty` FAIL + PagerDuty alert |
 
@@ -146,11 +146,11 @@ docker exec spark-cdc /opt/spark/bin/spark-submit `
 
 ## Verified Outcomes
 
-- ✅ DQ checks chạy sau mỗi chu kỳ Avro→Parquet cho cả 4 tables
-- ✅ Row lỗi (null PK / duplicate) trigger check failure
-- ✅ PagerDuty incident fire trong vòng 2 phút kể từ failure
-- ✅ Alert payload gồm: `table`, `error_type`, `timestamp`, `check`, `message`
-- ✅ `resolve_alert` tự đóng incident qua `dedup_key`
-- ✅ Pipeline không crash khi `PAGERDUTY_ROUTING_KEY` chưa được set
-- ✅ Prometheus metric `cdc_dq_check_status` hiển thị trên Grafana
-- ✅ Grafana rules cho Kafka lag (> 1000 msgs) và Spark stale (> 10 min) được provision sẵn
+- ✅ DQ checks run after every Avro→Parquet cycle for all 4 tables
+- ✅ Injected bad row (null PK / duplicate) triggers a check failure
+- ✅ PagerDuty incident fires within 2 minutes of failure
+- ✅ Alert payload includes: `table`, `error_type`, `timestamp`, `check`, `message`
+- ✅ `resolve_alert` auto-closes the incident via `dedup_key`
+- ✅ Pipeline runs without crashing when `PAGERDUTY_ROUTING_KEY` is not set
+- ✅ Prometheus metric `cdc_dq_check_status` visible in Grafana
+- ✅ Grafana rules for Kafka lag (> 1000 msgs) and Spark stale (> 10 min) provisioned automatically
