@@ -25,6 +25,7 @@ logger = logging.getLogger("cdc_processor.alert")
 PAGERDUTY_ROUTING_KEY = os.getenv("PAGERDUTY_ROUTING_KEY", "")
 PAGERDUTY_API_URL     = "https://events.pagerduty.com/v2/enqueue"
 REQUEST_TIMEOUT_SEC   = 10
+PAGERDUTY_DEDUP_MODE  = os.getenv("PAGERDUTY_DEDUP_MODE", "stable").strip().lower()
 
 
 def send_alert(
@@ -33,6 +34,7 @@ def send_alert(
     table: str,
     error_type: str,
     details: Optional[dict] = None,
+    dedup_suffix: Optional[str] = None,
 ) -> bool:
     """
     Gửi PagerDuty trigger event.
@@ -70,11 +72,12 @@ def send_alert(
     if details:
         custom_details.update(details)
 
+    dedup_key = _build_dedup_key(table, error_type, dedup_suffix=dedup_suffix)
+
     payload = {
         "routing_key":  PAGERDUTY_ROUTING_KEY,
         "event_action": "trigger",
-        # dedup_key: tránh tạo duplicate incidents cho cùng table + error_type
-        "dedup_key":    f"cdc-{table}-{error_type}",
+        "dedup_key":    dedup_key,
         "payload": {
             "summary":    summary,
             "severity":   severity,          # critical | error | warning | info
@@ -99,8 +102,8 @@ def send_alert(
 
         logger.info(
             "[PagerDuty] Incident triggered successfully. "
-            "dedup_key=cdc-%s-%s | severity=%s | status=%d",
-            table, error_type, severity, response.status_code,
+            "dedup_key=%s | severity=%s | status=%d",
+            dedup_key, severity, response.status_code,
         )
         return True
 
@@ -120,7 +123,28 @@ def send_alert(
         return False
 
 
-def resolve_alert(table: str, error_type: str) -> bool:
+def _build_dedup_key(table: str, error_type: str, dedup_suffix: Optional[str] = None) -> str:
+    """
+    Build PagerDuty dedup_key with configurable mode.
+
+    Modes:
+      - stable (default): same issue -> same incident
+      - daily: new incident per day (UTC)
+      - unique: new incident every trigger
+    """
+    base_key = f"cdc-{table}-{error_type}"
+    if dedup_suffix:
+        return f"{base_key}-{dedup_suffix}"
+
+    mode = PAGERDUTY_DEDUP_MODE
+    if mode == "daily":
+        return f"{base_key}-{datetime.now(timezone.utc).strftime('%Y%m%d')}"
+    if mode == "unique":
+        return f"{base_key}-{int(datetime.now(timezone.utc).timestamp())}"
+    return base_key
+
+
+def resolve_alert(table: str, error_type: str, dedup_suffix: Optional[str] = None) -> bool:
     """
     Gửi PagerDuty resolve event để đóng incident tự động khi vấn đề được khắc phục.
 
@@ -141,7 +165,7 @@ def resolve_alert(table: str, error_type: str) -> bool:
     payload = {
         "routing_key":  PAGERDUTY_ROUTING_KEY,
         "event_action": "resolve",
-        "dedup_key":    f"cdc-{table}-{error_type}",
+        "dedup_key":    _build_dedup_key(table, error_type, dedup_suffix=dedup_suffix),
     }
 
     try:
