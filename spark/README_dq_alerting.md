@@ -143,6 +143,8 @@ docker exec spark-cdc /opt/spark/bin/spark-submit `
 | 5 — Empty table | 0 rows | `non_empty` FAIL + PagerDuty alert |
 
 ---
+## Test
+docker exec spark-cdc /opt/spark/bin/spark-submit --master local[1] --jars "/opt/spark/extra-jars/hadoop-aws.jar,/opt/spark/extra-jars/aws-java-sdk-bundle.jar,/opt/spark/extra-jars/deequ.jar" /app/test_dq_alert.py
 
 ## Verified Outcomes
 
