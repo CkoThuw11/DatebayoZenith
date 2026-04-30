@@ -110,7 +110,7 @@ def get_sink_path(table_name: str) -> str:
     return f"s3a://{BUCKET}/parquet/{table_name}/"
 
 
-def collect_kafka_lag():
+def collect_kafka_lag() -> None:
     """Calculate Kafka lag for the S3 Sink Connector consumer group."""
     logger.info("Collecting Kafka Consumer Lag for group: %s", KAFKA_GROUP_ID)
     try:
@@ -133,7 +133,7 @@ def collect_kafka_lag():
                 committed = consumer.committed(tp)
                 end_offset = end_offsets.get(tp, 0)
 
-                # Nếu chưa commit bao giờ, tính lag từ đầu (end_offset)
+                # If no committed offset exists yet, count lag from offset 0.
                 lag = max(0, end_offset - (committed or 0))
 
                 g_kafka_lag.labels(table=table_name, partition=str(tp.partition)).set(lag)
@@ -205,14 +205,14 @@ def run_dq_checks(
     """
     Amazon Deequ (pydeequ) data quality checks.
 
-    Checks thực hiện cho mỗi table:
+    Checks per table:
       1. Non-empty       — hasSize: >= 1 row
-      2. Null PK         — isComplete: không có PK nào NULL
-      3. Uniqueness PK   — hasUniqueness: không có PK trùng lặp (hỗ trợ composite key)
+      2. Null PK         — isComplete: no primary key column may be NULL
+      3. Uniqueness PK   — hasUniqueness: no duplicate primary keys (composite-key aware)
       4. Valid cdc_op    — isContainedIn: cdc_op ∈ {c, u, r}
 
     Returns:
-        True nếu TẤT CẢ checks pass, False nếu có bất kỳ check nào fail.
+        True if all checks pass, False otherwise.
     """
 
     logger.info("[DQ] Running data quality checks for table '%s'...", table_name)
@@ -249,7 +249,7 @@ def run_dq_checks(
         )
         results.append(_run_pydeequ_check(spark, df, "valid_cdc_op", "invalid_cdc_op", valid_cdc_check))
 
-    # ── Tổng hợp & emit Prometheus + PagerDuty ───────────────────────────────
+    # ── Aggregate results and emit Prometheus + PagerDuty ────────────────────
     all_passed = True
     for r in results:
         g_dq_status.labels(table=table_name, check=r.check_name).set(1 if r.passed else 0)
@@ -273,20 +273,6 @@ def run_dq_checks(
     else:
         logger.error("[DQ] ✗ SOME CHECKS FAILED for table '%s' — see above.", table_name)
     return all_passed
-
-
-def _classify_check_error(check_name: str, pk_cols: List[str]) -> str:
-    """Map tên check → error_type string cho PagerDuty dedup_key."""
-    name_lower = check_name.lower()
-    if "null_pk" in name_lower:
-        return "null_pk"
-    if "unique_pk" in name_lower:
-        return "duplicate_pk"
-    if "cdc_op" in name_lower:
-        return "invalid_cdc_op"
-    if "non_empty" in name_lower:
-        return "empty_table"
-    return "dq_check_failed"
 
 
 def process_table(spark: SparkSession, table_name: str, pk_cols: List[str]) -> None:
@@ -387,13 +373,12 @@ def process_table(spark: SparkSession, table_name: str, pk_cols: List[str]) -> N
         )
 
         # ------------------------------------------------------------------
-        # 6. [NEW] Deequ Data Quality Checks — chạy sau khi write Parquet
-        #    Dùng df_deduped (bỏ partition cols để check sạch hơn)
+        # 6. Run DQ checks after write; use deduped business columns only.
         # ------------------------------------------------------------------
         run_dq_checks(spark, df_deduped, table_name, pk_cols)
 
     finally:
-        # Cập nhật Metrics dù thành công hay rỗng (để Grafana không bị đứt quãng dữ liệu)
+        # Always emit metrics, including empty/failed runs, for continuity.
         duration = time.time() - start_time
         g_rows.labels(table=table_name).set(rows_written)
         g_duration.labels(table=table_name).set(duration)
@@ -409,7 +394,7 @@ def main() -> None:
     logger.info("PagerDuty key : %s", "configured" if alert.PAGERDUTY_ROUTING_KEY else "NOT SET (graceful degradation)")
     logger.info("=" * 60)
 
-    # Đo độ trễ Kafka trước khi bắt đầu xử lý S3
+    # Collect Kafka lag before processing table data.
     collect_kafka_lag()
 
     spark = build_spark_session()
@@ -422,7 +407,7 @@ def main() -> None:
                 "Unhandled error processing table '%s': %s",
                 table_name, e, exc_info=True,
             )
-            # Gửi PagerDuty alert cho unhandled exception
+            # Trigger PagerDuty incident for unhandled table-level exception.
             alert.send_alert(
                 summary=f"[CDC Pipeline] Unhandled exception in table '{table_name}'",
                 severity="critical",
@@ -433,7 +418,7 @@ def main() -> None:
 
     spark.stop()
 
-    # Đẩy toàn bộ dữ liệu đo đạc (Metrics) sang Pushgateway
+    # Push collected metrics to Pushgateway.
     try:
         push_to_gateway(PUSHGATEWAY_URL, job='cdc_processor', registry=registry)
         logger.info("Successfully pushed metrics to Pushgateway: %s", PUSHGATEWAY_URL)

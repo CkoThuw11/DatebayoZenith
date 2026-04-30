@@ -42,7 +42,7 @@ Avro files (MinIO)
 
 ## Data Quality Checks (`run_dq_checks`)
 
-Implemented in **native PySpark** (compatible with Spark 3.5.x; pydeequ is not used at runtime).
+Implemented with **pydeequ** on top of Spark 3.5.x.
 
 Four checks run **per table** after every Avro→Parquet cycle:
 
