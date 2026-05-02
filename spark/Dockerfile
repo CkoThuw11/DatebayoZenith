@@ -22,6 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends dos2unix \
 COPY app/cdc_processor.py .
 COPY app/alert.py .
 COPY app/test_dq_alert.py .
+COPY app/init_hive.py .
 COPY entrypoint.sh .
 # Fix CRLF → LF and make executable (critical when editing on Windows)
 RUN dos2unix /app/entrypoint.sh && chmod +x /app/entrypoint.sh
