@@ -91,6 +91,7 @@ services:
     depends_on:
       - kafka
 
+  # FIX W2: Added healthcheck — Spark và Trino phải đợi MinIO IAM sẵn sàng
   minio:
     image: minio/minio
     hostname: minio
@@ -144,17 +145,25 @@ services:
   spark-cdc:
     build: ./spark
     container_name: spark-cdc
+    # FIX W2: Đợi MinIO healthy (IAM sẵn sàng) trước khi Spark start
     depends_on:
       minio:
         condition: service_healthy
     environment:
+      - SPARK_VERSION=3.3
       - MINIO_ROOT_USER=${MINIO_ROOT_USER}
       - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
       - MINIO_ENDPOINT=http://minio:9000
       - S3_BUCKET=northwind-data-lake
-      - SLEEP_INTERVAL=180
+      - SLEEP_INTERVAL=180 # 3 phút — nằm trong yêu cầu 3-5 phút
+      - PAGERDUTY_ROUTING_KEY=${PAGERDUTY_ROUTING_KEY}
     restart: on-failure
 
+  # ──────────────────────────────────────────────────────────────
+  # TRINO — SQL Query Engine cho Parquet Data Lake
+  # Reads từ s3a://northwind-data-lake/parquet/{table}/
+  # UI: http://localhost:8090
+  # ──────────────────────────────────────────────────────────────
   trino:
     image: trinodb/trino:435
     hostname: trino
@@ -217,9 +226,15 @@ services:
     environment:
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=admin
+      # Cấp key cho provisioning alerting.yaml
+      - PAGERDUTY_ROUTING_KEY=${PAGERDUTY_ROUTING_KEY}
+      # Bật Unified Alerting (mặc định trong Grafana 10, nhưng explicit cho rõ)
+      - GF_ALERTING_ENABLED=false
+      - GF_UNIFIED_ALERTING_ENABLED=true
     volumes:
       - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
       - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/alerting:/etc/grafana/provisioning/alerting
       - grafana_data:/var/lib/grafana
 
 volumes:

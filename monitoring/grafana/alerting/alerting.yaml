@@ -1,0 +1,213 @@
+# monitoring/grafana/alerting/alerting.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+# Grafana Alerting Provisioning (Grafana 10.x)
+# Tự động tạo:
+#   1. Contact Point "PagerDuty CDC Alerts" → PagerDuty Events API v2
+#   2. Alert Rule Group "CDC Data Quality & Kafka Lag"
+#      • Rule 1: Kafka Consumer Lag > 1000 → critical
+#      • Rule 2: Spark không chạy > 10 phút → critical
+#
+# Tham khảo:
+#   https://grafana.com/docs/grafana/latest/alerting/set-up/provision-alerting-resources/file-provisioning/
+# ─────────────────────────────────────────────────────────────────────────────
+
+apiVersion: 1
+
+# ─── Contact Points ───────────────────────────────────────────────────────────
+contactPoints:
+  - orgId: 1
+    name: PagerDuty CDC Alerts
+    receivers:
+      - uid: pagerduty-cdc-receiver
+        type: pagerduty
+        settings:
+          # Đọc Integration Key từ env var của Grafana container
+          # Nếu PAGERDUTY_ROUTING_KEY trống → Grafana vẫn tạo contact point
+          # nhưng sẽ fail khi gửi (graceful — không ảnh hưởng pipeline)
+          integrationKey: "${PAGERDUTY_ROUTING_KEY}"
+          url: "https://events.eu.pagerduty.com/v2/enqueue"
+          severity: critical
+          class: cdc-pipeline
+          component: kafka
+          group: data-engineering
+          details:
+            pipeline: "northwind-cdc"
+            environment: "local-dev"
+            dashboard: "http://localhost:3000"
+        disableResolveMessage: false
+
+# ─── Notification Policies ────────────────────────────────────────────────────
+policies:
+  - orgId: 1
+    receiver: PagerDuty CDC Alerts
+    group_by:
+      - alertname
+      - table
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h
+
+# ─── Alert Rules ──────────────────────────────────────────────────────────────
+groups:
+  - orgId: 1
+    name: CDC Data Quality & Kafka Lag
+    folder: CDC Monitoring
+    interval: 1m       # Đánh giá mỗi 1 phút
+    rules:
+
+      # ── Rule 1: Kafka Consumer Lag vượt ngưỡng ────────────────────────────
+      - uid: cdc-kafka-lag-alert
+        title: "CDC Kafka Consumer Lag Too High"
+        condition: C
+        data:
+          # A: Lấy giá trị lag hiện tại từ Prometheus
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: Prometheus
+            model:
+              expr: cdc_kafka_consumer_lag
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          # B: Giảm xuống giá trị cuối cùng (last value)
+          - refId: B
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: "__expr__"
+            model:
+              conditions:
+                - evaluator:
+                    params: []
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              hide: false
+              reducer: last
+              refId: B
+              type: reduce
+          # C: So sánh với ngưỡng 1000 messages
+          - refId: C
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: "__expr__"
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 1000        # ← ngưỡng: lag > 1000 messages → alert
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: B
+              hide: false
+              refId: C
+              type: threshold
+        noDataState: NoData
+        execErrState: Error
+        for: 1m            # Phải vi phạm liên tục ≥ 1 phút mới fire
+        annotations:
+          summary: "Kafka consumer lag quá cao: {{ $values.B.Value }} messages"
+          description: |
+            Topic: {{ $labels.table }} (partition: {{ $labels.partition }})
+            Lag hiện tại: {{ $values.B.Value }} messages
+            Ngưỡng: 1000 messages
+            Hành động: Kiểm tra Kafka Connect và S3 Sink Connector.
+          runbook_url: "http://localhost:3000/d/cdc-pipeline"
+        labels:
+          severity: critical
+          team: data-engineering
+          pipeline: northwind-cdc
+        isPaused: false
+
+      # ── Rule 2: Spark không chạy trong 10 phút ────────────────────────────
+      - uid: cdc-spark-stale-alert
+        title: "CDC Spark Processor Not Running"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: Prometheus
+            model:
+              # Thời gian kể từ lần cuối Spark chạy xong
+              expr: time() - cdc_last_run_timestamp_seconds
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: "__expr__"
+            model:
+              expression: A
+              hide: false
+              reducer: max       # Lấy max trong 4 tables
+              refId: B
+              type: reduce
+          - refId: C
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: "__expr__"
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 600      # ← ngưỡng: > 10 phút (600 giây) chưa chạy → alert
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              expression: B
+              hide: false
+              refId: C
+              type: threshold
+        noDataState: NoData
+        execErrState: Error
+        for: 2m
+        annotations:
+          summary: "Spark CDC Processor chưa chạy trong {{ $values.B.Value | humanizeDuration }}"
+          description: |
+            Spark processor chưa cập nhật metrics trong hơn 10 phút.
+            Khả năng cao: container crashed hoặc bị kẹt.
+            Hành động: Kiểm tra logs của spark-cdc container.
+        labels:
+          severity: critical
+          team: data-engineering
+          pipeline: northwind-cdc
+        isPaused: false

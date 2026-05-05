@@ -1,13 +1,43 @@
+"""
+CDC Processor: Avro → Parquet
+-----------------------------
+Reads Debezium CDC Avro files from MinIO (S3) written by the Kafka S3 Sink connector,
+deduplicates records using last-write-wins per primary key, and writes clean Parquet
+files back to MinIO under the `parquet/` prefix — partitioned by year/month/day.
+
+Data Quality: After each Avro→Parquet cycle, Amazon Deequ checks are run per table:
+  • Null PK check        — no primary key column may be NULL
+  • Uniqueness PK check  — no duplicate primary keys
+  • Valid cdc_op check   — cdc_op must be one of {c, u, r}
+  • Non-empty check      — table must have at least 1 row
+
+Alerting: On check failure or unhandled exception, alert.py fires a PagerDuty incident.
+          Graceful degradation when PAGERDUTY_ROUTING_KEY is not set.
+
+Runs as a batch on a schedule (called from entrypoint.sh every N minutes).
+"""
+
 import os
-import json
-import logging
-from datetime import datetime
-from typing import List, Optional
 import time
+import logging
+from datetime import datetime, timezone
+from typing import List
 
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
+from pydeequ.checks import Check, CheckLevel
+from pydeequ.verification import VerificationSuite, VerificationResult
+
+# Tích hợp Prometheus và Kafka Client cho Monitoring
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+from kafka import KafkaConsumer, TopicPartition
+
+# Data Quality
+from dataclasses import dataclass
+
+# PagerDuty Alerting
+import alert
 
 logging.basicConfig(
     level=logging.INFO,
@@ -16,374 +46,356 @@ logging.basicConfig(
 logger = logging.getLogger("cdc_processor")
 
 # ---------------------------------------------------------------------------
-# Configuration
+# Configuration (injected via environment variables from docker-compose)
 # ---------------------------------------------------------------------------
 MINIO_ENDPOINT   = os.getenv("MINIO_ENDPOINT", "http://minio:9000")
-MINIO_ACCESS_KEY = os.getenv("MINIO_ROOT_USER", "admin")
-MINIO_SECRET_KEY = os.getenv("MINIO_ROOT_PASSWORD", "admin123")
+MINIO_ACCESS_KEY = os.getenv("MINIO_ROOT_USER", "minioadmin")
+MINIO_SECRET_KEY = os.getenv("MINIO_ROOT_PASSWORD", "minioadmin123")
 BUCKET           = os.getenv("S3_BUCKET", "northwind-data-lake")
-DATABASE         = "northwind"
+
+# Cấu hình Monitoring
+PUSHGATEWAY_URL  = os.getenv("PUSHGATEWAY_URL", "pushgateway:9091")
+KAFKA_BOOTSTRAP  = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:29092")
+KAFKA_GROUP_ID   = os.getenv("KAFKA_GROUP_ID", "cdc-connect-group")
+
+# Tables to process and their primary keys
 TABLE_CONFIG = {
-    "orders":        {"pk": ["order_id"],              "ts_column": None},
-    "order_details": {"pk": ["order_id", "product_id"],"ts_column": None},
-    "products":      {"pk": ["product_id"],             "ts_column": None},
-    "customers":     {"pk": ["customer_id"],            "ts_column": None},
+    "orders":        {"pk": ["order_id"]},
+    "order_details": {"pk": ["order_id", "product_id"]},
+    "products":      {"pk": ["product_id"]},
+    "customers":     {"pk": ["customer_id"]},
 }
 
-TOPIC_PREFIX        = "northwind.public"
-CHECKPOINT_PREFIX   = f"s3a://{BUCKET}/{DATABASE}/_checkpoints"  # stores last-processed offset per table
-
+TOPIC_PREFIX = "northwind.public"
 
 # ---------------------------------------------------------------------------
-# SparkSession
+# Prometheus Metrics Setup
 # ---------------------------------------------------------------------------
+registry = CollectorRegistry()
+g_rows     = Gauge('cdc_rows_written_total', 'Deduplicated rows written', ['table'], registry=registry)
+g_duration = Gauge('cdc_processing_duration_seconds', 'Processing duration', ['table'], registry=registry)
+g_timestamp= Gauge('cdc_last_run_timestamp_seconds', 'Last run timestamp', ['table'], registry=registry)
+g_kafka_lag= Gauge('cdc_kafka_consumer_lag', 'Consumer lag per topic/partition', ['table', 'partition'], registry=registry)
+g_dq_status= Gauge('cdc_dq_check_status', 'Data quality check status (1=pass, 0=fail)', ['table', 'check'], registry=registry)
+
+
 def build_spark_session() -> SparkSession:
+    """Build and configure a SparkSession with S3A / MinIO support + Deequ."""
     spark = (
-        SparkSession.builder
-        .appName("cdc-pipeline")
-        .enableHiveSupport()
+        SparkSession.builder.appName("cdc-avro-to-parquet")
+        .config("spark.hadoop.fs.s3a.endpoint", MINIO_ENDPOINT)
+        .config("spark.hadoop.fs.s3a.access.key", MINIO_ACCESS_KEY)
+        .config("spark.hadoop.fs.s3a.secret.key", MINIO_SECRET_KEY)
+        .config("spark.hadoop.fs.s3a.path.style.access", "true")
+        .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
+        .config("spark.hadoop.fs.s3a.aws.credentials.provider",
+                "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider")
+        .config("spark.sql.extensions", "org.apache.spark.sql.avro.AvroExtensions")
+        .config("spark.sql.shuffle.partitions", "4")
+        # Deequ JAR đã được pre-fetch trong Docker image (/opt/spark/extra-jars/deequ.jar)
+        # và truyền qua --jars trong entrypoint.sh → không cần tải từ Maven lúc runtime
         .getOrCreate()
     )
-
-    spark.sparkContext.setLogLevel("ERROR")
-    spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
-
+    spark.sparkContext.setLogLevel("WARN")
     return spark
 
 
-# ---------------------------------------------------------------------------
-# Path helpers
-# ---------------------------------------------------------------------------
 def get_source_path(table_name: str) -> str:
+    """Avro files written by S3 Sink Connector."""
     topic = f"{TOPIC_PREFIX}.{table_name}"
     return f"s3a://{BUCKET}/topics/{topic}/"
 
+
 def get_sink_path(table_name: str) -> str:
-    return f"s3a://{BUCKET}/{DATABASE}/{table_name}/"
-
-def get_checkpoint_path(table_name: str) -> str:
-    return f"{CHECKPOINT_PREFIX}/{table_name}/checkpoint.json"
+    return f"s3a://{BUCKET}/parquet/{table_name}/"
 
 
-# ---------------------------------------------------------------------------
-# Checkpoint helpers
-# Checkpoints track the maximum `cdc_ts_ms` successfully written per table.
-# On the next run we only read Avro records with ts_ms GREATER than this value.
-# ---------------------------------------------------------------------------
-def load_checkpoint(spark: SparkSession, table_name: str) -> Optional[int]:
-    """Return the last max cdc_ts_ms written, or None if this is the first run."""
-    checkpoint_path = get_checkpoint_path(table_name)
+def collect_kafka_lag() -> None:
+    """Calculate Kafka lag for the S3 Sink Connector consumer group."""
+    logger.info("Collecting Kafka Consumer Lag for group: %s", KAFKA_GROUP_ID)
     try:
-        df = spark.read.text(checkpoint_path)
-        raw = df.collect()[0][0]
-        data = json.loads(raw)
-        ts = data.get("last_ts_ms")
-        logger.info("Checkpoint for '%s': last_ts_ms=%s", table_name, ts)
-        return ts
-    except Exception:
-        logger.info("No checkpoint found for '%s', will do full initial load.", table_name)
-        return None
-
-def save_checkpoint(spark: SparkSession, table_name: str, max_ts_ms: int) -> None:
-    """Persist the max cdc_ts_ms so the next run knows where to start."""
-    checkpoint_path = get_checkpoint_path(table_name)
-    payload = json.dumps({"last_ts_ms": max_ts_ms, "updated_at": datetime.utcnow().isoformat()})
-    # Write as a single-row text file; coalesce(1) ensures exactly one file.
-    spark.createDataFrame([(payload,)], ["value"]) \
-         .coalesce(1) \
-         .write.mode("overwrite").text(checkpoint_path)
-    logger.info("Checkpoint saved for '%s': last_ts_ms=%d", table_name, max_ts_ms)
-
-
-# ---------------------------------------------------------------------------
-# Partition column helpers (unchanged from original)
-# ---------------------------------------------------------------------------
-def add_partition_columns(df: DataFrame, table_name: str) -> DataFrame:
-    ts_column = TABLE_CONFIG[table_name].get("ts_column")
-    if ts_column and ts_column in df.columns:
-        col_type = df.schema[ts_column].dataType.typeName()
-        logger.info("Using business timestamp '%s' (type: %s) for partitioning", ts_column, col_type)
-        sample = df.select(ts_column).limit(3).collect()
-        sample_val = sample[0][ts_column] if sample else 0
-        if sample_val and sample_val > 1_000_000_000:
-            date_col = F.to_date(F.from_unixtime(F.col(ts_column)))
-        elif sample_val and 10_000 < sample_val < 100_000:
-            date_col = F.to_date(F.lit("1970-01-01").cast("date") + F.col(ts_column).cast("int"))
-        else:
-            date_col = F.to_date(F.col(ts_column).cast("string"))
-    else:
-        logger.info("Using CDC timestamp 'cdc_ts_ms' for partitioning")
-        date_col = F.to_date(F.from_unixtime(F.col("cdc_ts_ms") / 1000))
-
-    return df.withColumns({
-        "year":  F.year(date_col),
-        "month": F.month(date_col),
-        "day":   F.dayofmonth(date_col),
-    })
-
-
-# ---------------------------------------------------------------------------
-# Core processing logic
-# ---------------------------------------------------------------------------
-def wait_for_source_path(spark: SparkSession, path: str,
-                          max_retries: int = 5, delay: int = 10) -> bool:
-    for i in range(max_retries):
-        try:
-            spark.read.format("avro").option("recursiveFileLookup", "true") \
-                 .load(path).limit(1).count()
-            logger.info("Source path is ready: %s", path)
-            return True
-        except Exception as e:
-            logger.warning("Source not ready (attempt %d/%d): %s", i + 1, max_retries, e)
-            if i < max_retries - 1:
-                time.sleep(delay)
-    return False
-
-
-def read_new_avro_records(spark: SparkSession, source_path: str,
-                           last_ts_ms: Optional[int]) -> Optional[DataFrame]:
-    """
-    INCREMENTAL READ
-    ----------------
-    Read all Avro files under source_path, then immediately filter to only
-    rows with ts_ms > last_ts_ms (i.e. rows we haven't processed yet).
-
-    Why filter after reading rather than selecting specific files?
-    The S3 Sink Connector organises files by Kafka offset/time, not by ts_ms.
-    Filtering by column value after loading is simpler and still correct because
-    Spark only materialises matching partitions when it scans the data.
-    """
-    try:
-        raw_df = (
-            spark.read
-            .format("avro")
-            .option("recursiveFileLookup", "true")
-            .load(source_path)
+        consumer = KafkaConsumer(
+            bootstrap_servers=[KAFKA_BOOTSTRAP],
+            group_id=KAFKA_GROUP_ID,
+            enable_auto_commit=False
         )
+
+        for table_name in TABLE_CONFIG.keys():
+            topic = f"{TOPIC_PREFIX}.{table_name}"
+            partitions = consumer.partitions_for_topic(topic)
+            if not partitions:
+                continue
+
+            tps = [TopicPartition(topic, p) for p in partitions]
+            end_offsets = consumer.end_offsets(tps)
+
+            for tp in tps:
+                committed = consumer.committed(tp)
+                end_offset = end_offsets.get(tp, 0)
+
+                # If no committed offset exists yet, count lag from offset 0.
+                lag = max(0, end_offset - (committed or 0))
+
+                g_kafka_lag.labels(table=table_name, partition=str(tp.partition)).set(lag)
+                logger.info("Kafka Lag cho %s (partition %d): %d", topic, tp.partition, lag)
+
+        consumer.close()
     except Exception as e:
-        logger.warning("Cannot read source path %s: %s", source_path, e)
-        return None
-
-    if raw_df.isEmpty():
-        logger.info("No Avro data found at %s", source_path)
-        return None
-
-    # Apply incremental filter when a checkpoint exists
-    if last_ts_ms is not None:
-        raw_df = raw_df.filter(F.col("ts_ms") > last_ts_ms)
-        logger.info("Incremental filter: ts_ms > %d", last_ts_ms)
-    else:
-        logger.info("No checkpoint — performing full initial load")
-
-    return raw_df
+        logger.warning("Không thể lấy Kafka Lag. Kiểm tra lại Kafka broker. Chi tiết lỗi: %s", e)
 
 
-def extract_cdc_events(raw_df: DataFrame, pk_cols: List[str]) -> Optional[DataFrame]:
-    """
-    Parse Debezium envelope and deduplicate — latest record wins per PK.
-    Handles:
-      c  = create (INSERT)
-      u  = update (UPDATE)
-      r  = read   (snapshot)
-      d  = delete → dropped (handled by merge step below)
-    """
-    # Keep only live rows; ignore deletes at this stage
-    df_filtered = raw_df.filter(
-        F.col("op").isin("c", "u", "r") & F.col("after").isNotNull()
-    )
-    if df_filtered.isEmpty():
-        return None
-
-    after_fields = df_filtered.schema["after"].dataType.fieldNames()
-    df_flat = df_filtered.select(
-        *[F.col(f"after.{f}").alias(f) for f in after_fields],
-        F.col("ts_ms").alias("cdc_ts_ms"),
-        F.col("op").alias("cdc_op"),
-    )
-
-    # Deduplicate: keep the latest event per primary key within the new batch
-    window_spec = Window.partitionBy(*pk_cols).orderBy(F.col("cdc_ts_ms").desc())
-    return (
-        df_flat
-        .withColumn("_rank", F.row_number().over(window_spec))
-        .filter(F.col("_rank") == 1)
-        .drop("_rank")
-    )
+@dataclass
+class DQResult:
+    check_name: str   # vd: "null_pk:order_id"
+    passed: bool
+    message: str
+    error_type: str   # dùng cho PagerDuty dedup_key
 
 
-def merge_with_existing(spark: SparkSession,
-                         new_df: DataFrame,
-                         sink_path: str,
-                         pk_cols: List[str]) -> DataFrame:
-    """
-    MERGE (latest-wins join)
-    ------------------------
-    For every partition touched by new_df, combine existing Parquet rows with
-    the incoming CDC rows and keep only the most-recent record per PK.
-
-    This is a "poor man's MERGE" that avoids Delta Lake / Iceberg dependencies.
-    It works because:
-      1. We only read the partitions that new_df will overwrite (partition pruning).
-      2. We union old + new, then deduplicate by PK keeping max(cdc_ts_ms).
-      3. We write back ONLY those partitions (dynamic overwrite).
-
-    For tables with delete events you would union in a deleted-PKs filter here
-    and remove matching rows before writing.
-    """
+def _verification_message(spark: SparkSession, verification_result) -> str:
+    """Extract failure message from pydeequ VerificationResult."""
     try:
-        existing_df = (
-            spark.read
-            .format("parquet")
-            .load(sink_path)
+        result_df = VerificationResult.checkResultsAsDataFrame(spark, verification_result)
+        failed_rows = (
+            result_df.filter(F.col("constraint_status") != "Success")
+            .select("constraint", "constraint_message")
+            .collect()
         )
-    except Exception:
-        # Sink does not exist yet — first run, no merge needed
-        logger.info("Sink path not found, skipping merge (first write).")
-        return new_df
+        if not failed_rows:
+            return "all constraints passed"
+        details = []
+        for row in failed_rows:
+            constraint = row["constraint"] or "unknown_constraint"
+            message = row["constraint_message"] or "no failure detail"
+            details.append(f"{constraint}: {message}")
+        return "; ".join(details)
+    except Exception as exc:
+        return f"unable to parse pydeequ result details: {exc}"
 
-    # Find which year/month/day partitions are in the new batch
-    touched_partitions = (
-        new_df.select("year", "month", "day")
-              .distinct()
-              .collect()
+
+def _run_pydeequ_check(
+    spark: SparkSession,
+    df: DataFrame,
+    check_name: str,
+    error_type: str,
+    check: Check,
+) -> DQResult:
+    """Run a single pydeequ check and normalize to DQResult."""
+    verification_result = (
+        VerificationSuite(spark)
+        .onData(df)
+        .addCheck(check)
+        .run()
     )
-    if not touched_partitions:
-        return new_df
+    passed = str(verification_result.status) == "Success"
+    return DQResult(
+        check_name=check_name,
+        passed=passed,
+        message="all constraints passed" if passed else _verification_message(spark, verification_result),
+        error_type=error_type,
+    )
 
-    # Build a filter expression to select only the affected partitions from existing data
-    partition_filter = F.lit(False)
-    for row in touched_partitions:
-        partition_filter = partition_filter | (
-            (F.col("year")  == row["year"]) &
-            (F.col("month") == row["month"]) &
-            (F.col("day")   == row["day"])
+
+def run_dq_checks(
+    spark: SparkSession,
+    df: DataFrame,
+    table_name: str,
+    pk_cols: List[str],
+) -> bool:
+    """
+    Amazon Deequ (pydeequ) data quality checks.
+
+    Checks per table:
+      1. Non-empty       — hasSize: >= 1 row
+      2. Null PK         — isComplete: no primary key column may be NULL
+      3. Uniqueness PK   — hasUniqueness: no duplicate primary keys (composite-key aware)
+      4. Valid cdc_op    — isContainedIn: cdc_op ∈ {c, u, r}
+
+    Returns:
+        True if all checks pass, False otherwise.
+    """
+
+    logger.info("[DQ] Running data quality checks for table '%s'...", table_name)
+    results: List[DQResult] = []
+
+    # ── Check 1: Non-empty ────────────────────────────────────────────────────
+    non_empty_check = (
+        Check(spark, CheckLevel.Error, f"{table_name}:non_empty")
+        .hasSize(lambda size: size >= 1)
+    )
+    results.append(_run_pydeequ_check(spark, df, "non_empty", "empty_table", non_empty_check))
+
+    # ── Checks 2: Null PK per column ──────────────────────────────────────────
+    for pk_col in pk_cols:
+        null_pk_check = (
+            Check(spark, CheckLevel.Error, f"{table_name}:null_pk:{pk_col}")
+            .isComplete(pk_col)
         )
+        results.append(_run_pydeequ_check(spark, df, f"null_pk:{pk_col}", "null_pk", null_pk_check))
 
-    existing_touched = existing_df.filter(partition_filter)
-
-    logger.info("Merging %d new records with existing data in %d partition(s)",
-                new_df.count(), len(touched_partitions))
-
-    # Union and deduplicate: latest cdc_ts_ms wins per PK
-    window_spec = Window.partitionBy(*pk_cols).orderBy(F.col("cdc_ts_ms").desc())
-    merged = (
-        existing_touched.union(new_df)
-        .withColumn("_rank", F.row_number().over(window_spec))
-        .filter(F.col("_rank") == 1)
-        .drop("_rank")
+    # ── Check 3: Uniqueness PK (composite key aware) ─────────────────────────
+    unique_pk_check = (
+        Check(spark, CheckLevel.Error, f"{table_name}:unique_pk")
+        .hasUniqueness(pk_cols, lambda value: value == 1.0)
     )
+    unique_label = "unique_pk:" + "+".join(pk_cols)
+    results.append(_run_pydeequ_check(spark, df, unique_label, "duplicate_pk", unique_pk_check))
 
-    return merged
+    # ── Check 4: Valid cdc_op ─────────────────────────────────────────────────
+    if "cdc_op" in df.columns:
+        valid_cdc_check = (
+            Check(spark, CheckLevel.Error, f"{table_name}:valid_cdc_op")
+            .isContainedIn("cdc_op", ["c", "u", "r"])
+        )
+        results.append(_run_pydeequ_check(spark, df, "valid_cdc_op", "invalid_cdc_op", valid_cdc_check))
 
+    # ── Aggregate results and emit Prometheus + PagerDuty ────────────────────
+    all_passed = True
+    for r in results:
+        g_dq_status.labels(table=table_name, check=r.check_name).set(1 if r.passed else 0)
+        if r.passed:
+            logger.info("[DQ] ✓ PASS | table=%s | check=%s | %s",
+                        table_name, r.check_name, r.message)
+        else:
+            all_passed = False
+            logger.error("[DQ] ✗ FAIL | table=%s | check=%s | %s",
+                         table_name, r.check_name, r.message)
+            alert.send_alert(
+                summary=f"[CDC DQ] {table_name}: {r.check_name} FAILED",
+                severity="critical",
+                table=table_name,
+                error_type=r.error_type,
+                details={"check": r.check_name, "message": r.message},
+            )
 
-def register_partitions(spark, df, table_name):
-    """
-    Register partitions in Hive Metastore based on DataFrame content
-    """
-    partitions = (
-        df.select("year", "month", "day")
-          .distinct()
-          .collect()
-    )
-
-    if not partitions:
-        return
-    partition_sql = ",\n".join([
-        f"PARTITION (year={p['year']}, month={p['month']}, day={p['day']})"
-        for p in partitions
-    ])
-
-    spark.sql(f"""
-        ALTER TABLE {DATABASE}.{table_name}
-        ADD IF NOT EXISTS
-        {partition_sql}
-    """)
+    if all_passed:
+        logger.info("[DQ] ✓ ALL CHECKS PASSED for table '%s'", table_name)
+    else:
+        logger.error("[DQ] ✗ SOME CHECKS FAILED for table '%s' — see above.", table_name)
+    return all_passed
 
 
 def process_table(spark: SparkSession, table_name: str, pk_cols: List[str]) -> None:
     """
-    Full incremental pipeline for a single table:
-      1. Load checkpoint (last processed ts_ms)
-      2. Read only new Avro records since that checkpoint
-      3. Parse + deduplicate CDC events
-      4. Add partition columns
-      5. Merge new records with existing Parquet (per affected partition)
-      6. Write back only the changed partitions (partial overwrite)
-      7. Save updated checkpoint
+    Read Avro files for a single table, extract latest row per PK,
+    add partition columns, and write partitioned Parquet for Trino to query.
+    After writing, run Deequ data quality checks and alert on failure.
     """
     source_path = get_source_path(table_name)
     sink_path   = get_sink_path(table_name)
 
-    logger.info("=" * 50)
-    logger.info("Processing table: %s", table_name)
+    logger.info("Processing table '%s' from %s", table_name, source_path)
 
-    if not wait_for_source_path(spark, source_path):
-        logger.warning("Skipping '%s' — source path unavailable", table_name)
-        return
+    start_time   = time.time()
+    rows_written = 0
 
-    # --- Step 1: Checkpoint ---
-    last_ts_ms = load_checkpoint(spark, table_name)
+    try:
+        # ------------------------------------------------------------------
+        # 1. Read Avro files (S3 Sink AvroFormat — full Debezium envelope)
+        # ------------------------------------------------------------------
+        try:
+            raw_df = (
+                spark.read
+                .format("avro")
+                .option("recursiveFileLookup", "true")
+                .load(source_path)
+            )
+        except Exception as e:
+            logger.warning("Could not read source path %s – skipping. Error: %s", source_path, e)
+            return
 
-    # --- Step 2: Incremental read ---
-    raw_df = read_new_avro_records(spark, source_path, last_ts_ms)
-    if raw_df is None or raw_df.isEmpty():
-        logger.info("No new records for '%s', nothing to do.", table_name)
-        return
+        if raw_df.isEmpty():
+            logger.info("No data found for table '%s', skipping.", table_name)
+            return
 
-    new_record_count = raw_df.count()
-    logger.info("New Avro records for '%s': %d", table_name, new_record_count)
+        logger.info("Raw record count for '%s': %d", table_name, raw_df.count())
 
-    # --- Step 3: Parse & deduplicate ---
-    new_df = extract_cdc_events(raw_df, pk_cols)
-    if new_df is None or new_df.isEmpty():
-        logger.info("No insertable rows after CDC filter for '%s'.", table_name)
-        return
+        # ------------------------------------------------------------------
+        # 2. Explode Debezium envelope — keep c/u/r, drop deletes (op='d')
+        # ------------------------------------------------------------------
+        df_filtered = raw_df.filter(
+            (F.col("op").isin("c", "u", "r")) & F.col("after").isNotNull()
+        )
 
-    logger.info("Deduplicated new records: %d", new_df.count())
+        if df_filtered.isEmpty():
+            logger.info("No insertable rows for '%s' after op filter.", table_name)
+            return
 
-    # --- Step 4: Add partition columns ---
-    new_df = add_partition_columns(new_df, table_name)
-    # --- Extract partitions
-    partitions = (
-        new_df.select("year", "month", "day")
-              .distinct()
-              .collect()
-    )
+        # Flatten 'after' struct into top-level columns
+        after_fields = df_filtered.schema["after"].dataType.fieldNames()
+        df_flat = df_filtered.select(
+            *[F.col(f"after.{field}").alias(field) for field in after_fields],
+            F.col("ts_ms").alias("cdc_ts_ms"),
+            F.col("op").alias("cdc_op"),
+        )
 
-    # --- Step 5: Merge with existing Parquet (partial partitions only) ---
-    merged_df = merge_with_existing(spark, new_df, sink_path, pk_cols)
+        # ------------------------------------------------------------------
+        # 3. Deduplicate — last write wins per primary key (by ts_ms)
+        # ------------------------------------------------------------------
+        window_spec = Window.partitionBy(*pk_cols).orderBy(F.col("cdc_ts_ms").desc())
+        df_deduped = (
+            df_flat
+            .withColumn("_rank", F.row_number().over(window_spec))
+            .filter(F.col("_rank") == 1)
+            .drop("_rank")
+        )
 
-    # --- Step 6: Partial overwrite ---
-    # dynamic partitionOverwriteMode (set on SparkSession) ensures only the
-    # partitions present in merged_df are overwritten; others are untouched.
-    (
-        merged_df
-        .write
-        .mode("overwrite")
-        .option("compression", "snappy")
-        .partitionBy("year", "month", "day")
-        .parquet(sink_path)
-    )
-    logger.info("Wrote Parquet for '%s' → %s", table_name, sink_path)
+        rows_written = df_deduped.count()
+        logger.info("Deduplicated record count for '%s': %d", table_name, rows_written)
 
-    # --- Step 7: Save checkpoint ---
-    max_ts_ms = raw_df.agg(F.max("ts_ms")).collect()[0][0]
-    if max_ts_ms:
-        save_checkpoint(spark, table_name, int(max_ts_ms))
+        # ------------------------------------------------------------------
+        # 4. Add partition columns year / month / day
+        # ------------------------------------------------------------------
+        now_utc = datetime.now(timezone.utc)
+        df_partitioned = df_deduped.withColumns({
+            "year":  F.lit(str(now_utc.year)),
+            "month": F.lit(str(now_utc.month).zfill(2)),
+            "day":   F.lit(str(now_utc.day).zfill(2)),
+        })
 
-    # --- Step 8: Sync with Hive Metastore
-    register_partitions(spark, partitions, table_name)
+        # ------------------------------------------------------------------
+        # 5. Write Parquet — partitioned by year/month/day, Snappy compressed
+        # ------------------------------------------------------------------
+        (
+            df_partitioned
+            .coalesce(1)
+            .write
+            .mode("overwrite")
+            .option("compression", "snappy")
+            .partitionBy("year", "month", "day")
+            .parquet(sink_path)
+        )
+
+        logger.info(
+            "Wrote Parquet for '%s' → %s  (partition: year=%s/month=%s/day=%s)",
+            table_name, sink_path,
+            now_utc.year, str(now_utc.month).zfill(2), str(now_utc.day).zfill(2),
+        )
+
+        # ------------------------------------------------------------------
+        # 6. Run DQ checks after write; use deduped business columns only.
+        # ------------------------------------------------------------------
+        run_dq_checks(spark, df_deduped, table_name, pk_cols)
+
+    finally:
+        # Always emit metrics, including empty/failed runs, for continuity.
+        duration = time.time() - start_time
+        g_rows.labels(table=table_name).set(rows_written)
+        g_duration.labels(table=table_name).set(duration)
+        g_timestamp.labels(table=table_name).set(time.time())
 
 
-# ---------------------------------------------------------------------------
-# Entrypoint
-# ---------------------------------------------------------------------------
 def main() -> None:
     logger.info("=" * 60)
-    logger.info("CDC Processor starting  (incremental Avro → Parquet)")
-    logger.info("MinIO endpoint : %s", MINIO_ENDPOINT)
-    logger.info("Bucket         : %s", BUCKET)
+    logger.info("CDC Processor starting  (Avro → Parquet)")
+    logger.info("Source bucket : %s", BUCKET)
+    logger.info("MinIO endpoint: %s", MINIO_ENDPOINT)
+    logger.info("Sink prefix   : parquet/")
+    logger.info("PagerDuty key : %s", "configured" if alert.PAGERDUTY_ROUTING_KEY else "NOT SET (graceful degradation)")
     logger.info("=" * 60)
+
+    # Collect Kafka lag before processing table data.
+    collect_kafka_lag()
 
     spark = build_spark_session()
 
@@ -391,9 +403,28 @@ def main() -> None:
         try:
             process_table(spark, table_name, cfg["pk"])
         except Exception as e:
-            logger.error("Unhandled error for '%s': %s", table_name, e, exc_info=True)
+            logger.error(
+                "Unhandled error processing table '%s': %s",
+                table_name, e, exc_info=True,
+            )
+            # Trigger PagerDuty incident for unhandled table-level exception.
+            alert.send_alert(
+                summary=f"[CDC Pipeline] Unhandled exception in table '{table_name}'",
+                severity="critical",
+                table=table_name,
+                error_type="unhandled_exception",
+                details={"exception": str(e)},
+            )
 
     spark.stop()
+
+    # Push collected metrics to Pushgateway.
+    try:
+        push_to_gateway(PUSHGATEWAY_URL, job='cdc_processor', registry=registry)
+        logger.info("Successfully pushed metrics to Pushgateway: %s", PUSHGATEWAY_URL)
+    except Exception as e:
+        logger.error("Failed to push metrics to Pushgateway: %s", e)
+
     logger.info("CDC Processor run complete.")
 
 
