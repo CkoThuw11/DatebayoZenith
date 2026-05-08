@@ -5,32 +5,29 @@
         <name>javax.jdo.option.ConnectionURL</name>
         <value>jdbc:postgresql://metastore-db:5432/metastore</value>
     </property>
+
     <property>
         <name>javax.jdo.option.ConnectionDriverName</name>
         <value>org.postgresql.Driver</value>
     </property>
+
     <property>
         <name>javax.jdo.option.ConnectionUserName</name>
         <value>hive</value>
     </property>
+
     <property>
         <name>javax.jdo.option.ConnectionPassword</name>
         <value>hive</value>
     </property>
 
     <property>
-        <!-- Warehouse directory -->
-        <name>hive.metastore.warehouse.dir</name>
-        <value>s3a://northwind-data-lake/warehouse/</value>
+        <name>datanucleus.schema.autoCreateAll</name>
+        <value>true</value>
     </property>
 
+    <!-- Metastore server bind host-->
     <property>
-        <!-- Metastore URIs -->
-        <name>hive.metastore.uris</name>
-        <value>thrift://hive-metastore:9083</value>
-    </property>
-    <property>
-        <!-- Metastore bind host -->
         <name>hive.metastore.bind.host</name>
         <value>0.0.0.0</value>
     </property>
@@ -40,19 +37,23 @@
     </property>
 
     <property>
-        <!-- Auto create schema -->
-        <name>datanucleus.schema.autoCreateAll</name>
-        <value>true</value>
-    </property>
-    <property>
-        <!-- Schema verification -->
         <name>hive.metastore.schema.verification</name>
         <value>false</value>
     </property>
 
+    <!-- For clients connecting to metastore -->
     <property>
-        <!-- Event db notification api auth -->
+        <name>hive.metastore.uris</name>
+        <value>thrift://hive-metastore:9083</value>
+    </property>
+
+    <property>
         <name>hive.metastore.event.db.notification.api.auth</name>
         <value>false</value>
+    </property>
+
+    <property>
+        <name>hive.metastore.warehouse.dir</name>
+        <value>s3a://warehouse/</value>
     </property>
 </configuration>
