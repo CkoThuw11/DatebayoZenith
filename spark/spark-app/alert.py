@@ -1,15 +1,3 @@
-"""
-alert.py — PagerDuty Alerting Module
---------------------------------------
-Gọi PagerDuty Events API v2 để tạo incident khi phát hiện lỗi
-trong quá trình xử lý CDC pipeline.
-
-Graceful degradation: Nếu PAGERDUTY_ROUTING_KEY trống (chưa cấu hình),
-module chỉ ghi log WARNING thay vì crash — pipeline vẫn tiếp tục chạy.
-
-Tham khảo: https://developer.pagerduty.com/docs/events-api-v2/trigger-events/
-"""
-
 import os
 import logging
 from datetime import datetime, timezone
@@ -19,9 +7,6 @@ import requests
 
 logger = logging.getLogger("cdc_processor.alert")
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
 PAGERDUTY_ROUTING_KEY = os.getenv("PAGERDUTY_ROUTING_KEY", "")
 PAGERDUTY_API_URL     = "https://events.pagerduty.com/v2/enqueue"
 REQUEST_TIMEOUT_SEC   = 10
@@ -35,42 +20,39 @@ def send_alert(
     error_type: str,
     details: Optional[dict] = None,
     dedup_suffix: Optional[str] = None,
+    group: str = "data-quality",
+    component: Optional[str] = None,
 ) -> bool:
     """
-    Gửi PagerDuty trigger event.
+    Send a PagerDuty trigger event.
 
     Args:
-        summary    : Mô tả ngắn gọn về sự cố (hiển thị trong PagerDuty).
+        summary    : Short description of the incident (displayed in PagerDuty).
         severity   : "critical" | "error" | "warning" | "info"
-        table      : Tên bảng bị lỗi (vd: "orders").
-        error_type : Loại lỗi (vd: "null_pk", "duplicate_pk", "deequ_check_failed").
-        details    : Dict tuỳ chọn chứa thông tin bổ sung (rows, check_name, ...).
+        table      : Name of the affected table (e.g. "orders").
+        error_type : Type of error (e.g. "null_pk", "duplicate_pk", "deequ_check_failed").
+        details    : Dict owned by the call site — must include consecutive_failures,
+                     proof fields, and dashboard_url. No fields are auto-injected.
+        group      : PagerDuty group — "data-quality" or "infrastructure".
+        component  : Subsystem that fired — e.g. "spark/dq_checks", "spark/freshness_check".
+                     Defaults to "spark-cdc/{table}" if not provided.
 
     Returns:
-        True nếu gửi thành công, False nếu không (bao gồm cả key trống).
+        True if sent successfully, False otherwise (includes empty key case).
     """
     timestamp_utc = datetime.now(timezone.utc).isoformat()
 
-    # ── Graceful degradation: không có key → log và bỏ qua ──────────────────
     if not PAGERDUTY_ROUTING_KEY:
         logger.warning(
-            "[PagerDuty] PAGERDUTY_ROUTING_KEY chưa được cấu hình. "
-            "Alert bị bỏ qua (graceful degradation). "
-            "Incident sẽ được gửi khi có routing key thực. | "
+            "[PagerDuty] PAGERDUTY_ROUTING_KEY is not configured. "
+            "Alert skipped (graceful degradation). "
+            "Incident will be sent when a real routing key is available. | "
             "table=%s | error_type=%s | severity=%s | summary=%s",
             table, error_type, severity, summary,
         )
         return False
 
-    # ── Xây dựng payload theo PagerDuty Events API v2 ───────────────────────
-    custom_details = {
-        "table":      table,
-        "error_type": error_type,
-        "timestamp":  timestamp_utc,
-        "source":     "spark-cdc-processor",
-    }
-    if details:
-        custom_details.update(details)
+    custom_details = details or {}
 
     dedup_key = _build_dedup_key(table, error_type, dedup_suffix=dedup_suffix)
 
@@ -80,17 +62,16 @@ def send_alert(
         "dedup_key":    dedup_key,
         "payload": {
             "summary":    summary,
-            "severity":   severity,          # critical | error | warning | info
+            "severity":   severity,         
             "source":     "cdc-processor",
             "timestamp":  timestamp_utc,
-            "component":  f"spark-cdc/{table}",
-            "group":      "data-quality",
+            "component":  component or f"spark-cdc/{table}",
+            "group":      group,
             "class":      error_type,
             "custom_details": custom_details,
         },
     }
 
-    # ── Gửi HTTP request ─────────────────────────────────────────────────────
     try:
         response = requests.post(
             PAGERDUTY_API_URL,
@@ -146,18 +127,18 @@ def _build_dedup_key(table: str, error_type: str, dedup_suffix: Optional[str] = 
 
 def resolve_alert(table: str, error_type: str, dedup_suffix: Optional[str] = None) -> bool:
     """
-    Gửi PagerDuty resolve event để đóng incident tự động khi vấn đề được khắc phục.
+    Send a PagerDuty resolve event to automatically close an incident when the issue is fixed.
 
     Args:
-        table      : Tên bảng (phải khớp với dedup_key lúc trigger).
-        error_type : Loại lỗi (phải khớp với dedup_key lúc trigger).
+        table      : Table name (must match the dedup_key used at trigger time).
+        error_type : Error type (must match the dedup_key used at trigger time).
 
     Returns:
-        True nếu gửi thành công, False nếu không.
+        True if sent successfully, False otherwise.
     """
     if not PAGERDUTY_ROUTING_KEY:
         logger.debug(
-            "[PagerDuty] Resolve skipped — routing key không được cấu hình. "
+            "[PagerDuty] Resolve skipped — routing key is not configured. "
             "table=%s | error_type=%s", table, error_type,
         )
         return False
