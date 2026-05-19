@@ -41,6 +41,8 @@ g_rows      = Gauge("cdc_rows_written_total",          "New deduplicated rows wr
 g_duration  = Gauge("cdc_processing_duration_seconds", "Processing duration per table",          ["table"],          registry=registry)
 g_timestamp = Gauge("cdc_last_run_timestamp_seconds",  "Unix timestamp of last successful run",  ["table"],          registry=registry)
 g_dq_status = Gauge("cdc_dq_check_status",             "DQ check status (1=pass, 0=fail)",       ["table", "check"], registry=registry)
+g_rows_read = Gauge("cdc_rows_read_total", "Rows read from raw before dedupe", ["table"], registry=registry)
+g_dq_last_run = Gauge("cdc_dq_last_run_timestamp_seconds", "Unix timestamp of last DQ run", ["table"], registry=registry)
 
 g_freshness_gap = Gauge(
     "cdc_freshness_gap_seconds",
@@ -223,6 +225,7 @@ def process_table(spark: SparkSession, table_name: str, pk_cols: List[str]) -> N
 
     start_time   = time.time()
     rows_written = 0
+    rows_read    = 0
 
     try:
         # ── 1. Load checkpoint ────────────────────────────────────────────
@@ -281,6 +284,7 @@ def process_table(spark: SparkSession, table_name: str, pk_cols: List[str]) -> N
             .filter(F.col("_rank") == 1)
             .drop("_rank")
         )
+        rows_read = df_flat.count()
         rows_written = df_deduped.count()
         logger.info("Deduplicated record count for '%s': %d", table_name, rows_written)
 
@@ -339,7 +343,9 @@ def process_table(spark: SparkSession, table_name: str, pk_cols: List[str]) -> N
     finally:
         duration = time.time() - start_time
         g_rows.labels(table=table_name).set(rows_written)
+        g_rows_read.labels(table=table_name).set(rows_read)
         g_duration.labels(table=table_name).set(duration)
+        g_dq_last_run.labels(table=table_name).set(time.time())
         g_timestamp.labels(table=table_name).set(time.time())
 
         # ── Freshness gap — always computed, even on DQ failure or exception ─
