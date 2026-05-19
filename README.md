@@ -39,6 +39,59 @@ Trino (via Hive Metastore)
 ---
 
 ## Infrastructure
+## 🛤️ Data Lineage
+
+```mermaid
+flowchart LR
+    %% Định nghĩa các style
+    classDef db fill:#336791,stroke:#fff,stroke-width:2px,color:#fff;
+    classDef kafka fill:#231F20,stroke:#fff,stroke-width:2px,color:#fff;
+    classDef storage fill:#C72E49,stroke:#fff,stroke-width:2px,color:#fff;
+    classDef process fill:#E25A1C,stroke:#fff,stroke-width:2px,color:#fff;
+    classDef query fill:#DD00A1,stroke:#fff,stroke-width:2px,color:#fff;
+
+    %% Data Sources
+    subgraph Source ["1. Source System"]
+        Gen([Python Generator])
+        PG[(PostgreSQL)]:::db
+        Gen -- "INSERT/UPDATE" --> PG
+    end
+
+    %% Ingestion
+    subgraph Ingestion ["2. CDC & Streaming"]
+        Debezium[Debezium Connector]
+        Kafka{Apache Kafka\n(Topic)}:::kafka
+        S3Sink[S3 Sink Connector]
+        
+        PG -- "WAL Changes" --> Debezium
+        Debezium -- "Avro" --> Kafka
+        Kafka -- "Consume" --> S3Sink
+    end
+
+    %% Data Lake & Processing
+    subgraph DataLake ["3. Data Lake & Processing"]
+        MinIORaw[(MinIO\nRaw: Avro)]:::storage
+        Spark[Apache Spark\n+ Deequ DQ]:::process
+        MinIOProc[(MinIO\nProcessed: Parquet)]:::storage
+        
+        S3Sink -- "Write Files" --> MinIORaw
+        MinIORaw -- "Read Batch" --> Spark
+        Spark -- "Write Transformed" --> MinIOProc
+    end
+
+    %% Analytics
+    subgraph Analytics ["4. Analytics"]
+        Trino[Trino Engine]:::query
+        User((Data Analyst))
+        
+        MinIOProc -. "External Table" .- Trino
+        User -- "SQL" --> Trino
+    end
+```
+
+---
+
+## 🏗️ Infrastructure
 
 | Service | Role |
 |---|---|
