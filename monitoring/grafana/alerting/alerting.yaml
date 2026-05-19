@@ -38,7 +38,7 @@ groups:
             relativeTimeRange: { from: 600, to: 0 }
             datasourceUid: prometheus-ds
             model:
-              expr: sum by (topic) (kafka_consumergroup_lag{consumergroup="connect-minio-s3-sink-connector"})
+              expr: max by (topic) (kafka_consumergroup_lag{consumergroup="connect-minio-s3-sink-connector"})
               instant: true
               intervalMs: 1000
               maxDataPoints: 43200
@@ -104,7 +104,7 @@ groups:
             relativeTimeRange: { from: 600, to: 0 }
             datasourceUid: prometheus-ds
             model:
-              expr: time() - cdc_last_run_timestamp_seconds
+              expr: time() - cdc_last_run_timestamp_seconds{table=~".+"}
               instant: true
               intervalMs: 1000
               maxDataPoints: 43200
@@ -132,23 +132,19 @@ groups:
               hide: false
               refId: C
               type: threshold
-        noDataState: Alerting
+        noDataState: NoData
         execErrState: Error
         for: 2m
         annotations:
-          # What is the problem?
           summary: "[CDC Spark] Processor has not run for {{ $values.B.Value | humanizeDuration }} (threshold: 10 min) — bronze writes are stopped"
           description: |
-            # Where does it belong?
             component: spark/cdc-processor
             container: spark-cdc
 
-            # What is the proof?
             silence_duration: {{ $values.B.Value | humanizeDuration }}
             threshold: 10 minutes
             metric: cdc_last_run_timestamp_seconds (no update received)
 
-            # What do I do next?
             dashboard_url: "http://localhost:3000/d/cdc-pipeline?viewPanel=4"
             steps: |
               1. Check if the container is still running:
@@ -166,3 +162,67 @@ groups:
           group: infrastructure
           pipeline: northwind-cdc
         isPaused: false
+  - uid: cdc-freshness-breach-alert
+    title: "CDC Data Freshness SLA Breach"
+    condition: C
+    data:
+      - refId: A
+        relativeTimeRange: { from: 600, to: 0 }
+        datasourceUid: prometheus-ds
+        model:
+          expr: cdc_freshness_gap_seconds{table=~".+"}
+          instant: true
+          intervalMs: 1000
+          maxDataPoints: 43200
+          refId: A
+      - refId: B
+        relativeTimeRange: { from: 600, to: 0 }
+        datasourceUid: "__expr__"
+        model:
+          expression: A
+          hide: false
+          reducer: max
+          refId: B
+          type: reduce
+      - refId: C
+        relativeTimeRange: { from: 600, to: 0 }
+        datasourceUid: "__expr__"
+        model:
+          conditions:
+            - evaluator: { params: [900], type: gt }   # 900s = 15 phút
+              operator: { type: and }
+              query: { params: [B] }
+              reducer: { params: [], type: last }
+              type: query
+          expression: B
+          hide: false
+          refId: C
+          type: threshold
+    noDataState: NoData
+    execErrState: Error
+    for: 2m
+    annotations:
+      summary: "[CDC Freshness] Table {{ $labels.table }} is {{ $values.B.Value | humanizeDuration }} stale (SLA: 15 min)"
+      description: |
+        component: spark/freshness_check
+        table: {{ $labels.table }}
+
+        freshness_gap: {{ $values.B.Value | humanizeDuration }}
+        threshold: 15 minutes (900 seconds)
+
+        dashboard_url: "http://localhost:3000/d/cdc-pipeline?var-table={{ $labels.table }}"
+        steps: |
+          1. Check last successful Spark run:
+            curl -s pushgateway:9091/metrics | grep cdc_last_run_timestamp
+          2. Check if Spark is running:
+            docker ps | grep spark-cdc
+          3. Check Spark logs for DQ failure blocking writes:
+            docker logs spark-cdc --tail 100
+          4. If DQ is blocking writes, inspect quarantine data and fix upstream source.
+      runbook_url: "http://localhost:3000/d/cdc-pipeline"
+    labels:
+      severity: critical
+      component: spark
+      group: data-quality
+      pipeline: northwind-cdc
+    isPaused: false

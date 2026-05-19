@@ -60,18 +60,37 @@ services:
       CONNECT_PLUGIN_PATH: /usr/share/java,/usr/share/confluent-hub-components
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      KAFKA_OPTS: "-javaagent:/tmp/jmx-agent/jmx_prometheus_javaagent.jar=7071:/tmp/jmx-config/kafka-connect-jmx.yml"
     command:
       - bash
-      - -c
+      - -ec
       - |
+        set -e
+
+        echo "Preparing JMX exporter..."
+        mkdir -p /tmp/jmx-agent
+
+        echo "Downloading JMX Prometheus agent..."
+        wget -O /tmp/jmx-agent/jmx_prometheus_javaagent.jar \
+          https://repo1.maven.org/maven2/io/prometheus/jmx/jmx_prometheus_javaagent/0.20.0/jmx_prometheus_javaagent-0.20.0.jar
+
+        echo "Verifying JAR..."
+        ls -lh /tmp/jmx-agent/
+        test -s /tmp/jmx-agent/jmx_prometheus_javaagent.jar
+
         echo "Installing Debezium PostgreSQL connector..."
         confluent-hub install --no-prompt debezium/debezium-connector-postgresql:2.4.2
+
         echo "Installing S3 Sink connector..."
         confluent-hub install --no-prompt confluentinc/kafka-connect-s3:10.5.7
-        echo "Connectors installed. Starting Kafka Connect..."
-        /etc/confluent/docker/run
+
+        echo "Starting Kafka Connect..."
+        exec /etc/confluent/docker/run
+    volumes:
+      - ./monitoring/jmx/kafka-connect-jmx.yml:/tmp/jmx-config/kafka-connect-jmx.yml:ro
     ports:
       - "8083:8083"
+      - "7071:7071"
 
 
   akhq:
