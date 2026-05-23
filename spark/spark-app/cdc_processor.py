@@ -51,13 +51,6 @@ g_freshness_gap = Gauge(
     registry=registry,
 )
 
-g_partition_registered = Gauge(
-    "cdc_partition_registered",
-    "Hive partition registration status (1=success, 0=failed)",
-    ["table"],
-    registry=registry,
-)
-
 g_consecutive_failures = Gauge(
     "cdc_consecutive_failures_total",
     "Consecutive Spark run failures for this table without a successful write",
@@ -150,7 +143,7 @@ def save_checkpoint(spark: SparkSession, table_name: str, last_ts_ms: int) -> No
     try:
         fs      = _get_hadoop_fs(spark, path)
         jpath   = spark.sparkContext._jvm.org.apache.hadoop.fs.Path(path)
-        stream  = fs.create(jpath, True)  # overwrite=True
+        stream  = fs.create(jpath, True) 
         writer  = spark.sparkContext._jvm.java.io.PrintWriter(
                       spark.sparkContext._jvm.java.io.OutputStreamWriter(stream, "UTF-8"))
         payload = json.dumps({"table": table_name, "last_processed_ts_ms": last_ts_ms})
@@ -323,8 +316,7 @@ def process_table(spark: SparkSession, table_name: str, pk_cols: List[str]) -> N
         )
 
         # ── 9. Register partition in Hive Metastore ───────────────────────
-        partition_ok = register_hive_partition(spark, table_name, now_utc.year, now_utc.month, now_utc.day)
-        g_partition_registered.labels(table=table_name).set(1 if partition_ok else 0)
+        register_hive_partition(spark, table_name, now_utc.year, now_utc.month, now_utc.day)
 
         # ── 10. Save checkpoint ───────────────────────────────────────────
         max_ts_row = df_deduped.agg(F.max("cdc_ts_ms").alias("max_ts")).collect()[0]
@@ -344,8 +336,8 @@ def process_table(spark: SparkSession, table_name: str, pk_cols: List[str]) -> N
         duration = time.time() - start_time
         g_rows.labels(table=table_name).set(rows_written)
         g_rows_read.labels(table=table_name).set(rows_read)
-        g_duration.labels(table=table_name).set(duration)
         g_dq_last_run.labels(table=table_name).set(time.time())
+        g_duration.labels(table=table_name).set(duration)
         g_timestamp.labels(table=table_name).set(time.time())
 
         # ── Freshness gap — always computed, even on DQ failure or exception ─
