@@ -1,293 +1,257 @@
-# NorthStream
+# 🌊 NorthStream - Real-Time CDC Data Replication Pipeline
 
-> **Production-grade CDC Pipeline** — captures every row-level change from a PostgreSQL Northwind database, streams it through Kafka in Avro format, converts to Parquet via Spark, runs automated data-quality checks with Deequ, exposes the results for SQL analytics through Trino, and monitors end-to-end pipeline health with Prometheus, Grafana, and PagerDuty alerting.
-
----
-
-## Architecture
-
-![CDC Pipeline Architecture: PostgreSQL → Debezium → Kafka → Schema Registry → S3 Sink → MinIO → Spark → Parquet → Trino](imgs/Architecture.png)
-
-### Data Flow
-
-```
-PostgreSQL (Northwind)
-  │  WAL (logical replication)
-  ▼
-Debezium (Kafka Connect source connector)
-  │  CDC events (Avro + Schema Registry)
-  ▼
-Kafka (KRaft, single-node)
-  │  Topics: orders, order_details, products
-  ▼
-S3 Sink Connector (Kafka Connect)
-  │  Avro files, time-partitioned (year/month/day)
-  ▼
-MinIO  ──  raw bucket
-  │
-  ▼
-Spark CDC Processor (scheduled every 60s)
-  │
-  ▼
-MinIO  ──  bronze bucket (Parquet)
-  │
-  ▼
-Trino (via Hive Metastore)
-  └── SQL analytics
-```
+> A PoC CDC platform for replicating PostgreSQL operational data into an isolated analytics environment using Debezium, Kafka, Spark, MinIO, Trino, and Grafana.
 
 ---
 
-## Infrastructure
-## 🛤️ Data Lineage
+# 💥 Challenge: Unsafe Debugging on Production Systems
 
-![Data Lineage: Source: Postgres schema public → Kafka topic orders,products → S3 raw → Spark processed → S3/MinIO → Trino](imgs/DataLineage.png)
+Developers often need production-like data for debugging and testing.
+
+However, traditional approaches are inefficient and risky:
+- Data replication is slow and quickly becomes outdated
+- Production incidents are difficult to reproduce
+- Direct queries on production systems may impact performance and stability
+
+Therefore, organizations need an isolated environment that provides near real-time operational data without affecting production systems.
 
 ---
 
-## 🏗️ Infrastructure
+# ✅ Solution
 
-| Service | Role |
+NorthStream provides a real-time CDC replication platform that continuously synchronizes PostgreSQL data into an isolated analytics environment.
+
+---
+
+# 🛠️ Technology Stack
+
+| Layer | Technologies |
 |---|---|
-| **Kafka** | KRaft broker + controller |
-| **Schema Registry** | Avro schema management |
-| **Kafka Connect** | Hosts Debezium source + S3 Sink connectors |
-| **AKHQ** | Kafka web UI (topics, consumers, schemas) |
-| **MinIO** | S3-compatible object storage (raw + bronze buckets) |
-| **PostgreSQL** | Northwind source database (WAL logical replication) |
-| **Data Generator** | Inserts orders, products every 10 s (Faker) | — |
-| **Spark** | Avro → Parquet incremental CDC processor + Deequ DQ |
-| **Hive Metastore** | Schema catalog for Spark + Trino |
-| **Metastore DB** | PostgreSQL backend for Hive Metastore |
-| **Trino** | Distributed SQL query engine |
-| **Pushgateway** | Receives batch metrics from Spark |
-| **Prometheus** | Scrapes Pushgateway, Kafka Exporter, JMX Exporter |
-| **Kafka Exporter** | Exports consumer-group lag metrics |
-| **Grafana** | Dashboards + alert rules → PagerDuty |
+| CDC | Debezium, Kafka Connect |
+| Streaming | Apache Kafka |
+| Storage | MinIO |
+| Processing | Apache Spark |
+| Data Quality | Deequ |
+| Query Engine | Trino |
+| Monitoring | Prometheus, Grafana |
+| Alerting | PagerDuty |
+| Containerization | Docker Compose |
 
 ---
 
-## Repository Structure
+# 🌟 System Architecture
 
-```
-DatebayoZenith/
-├── docker-compose.yaml              
-├── .env.example                     # Environment variables template
-├── register-connectors.sh           # Waits for readiness, creates buckets, registers connectors
-│
-├── connectors/
-│   ├── debezium-postgres.json       # Source: CDC from public.{orders,order_details,products}
-│   └── s3-sink-minio-production.json # Sink: Avro → MinIO raw/, time-partitioned, flush every 50 records / 60 s
-│
-├── postgres/
-│   └── init.sql                     # Northwind schema + seed data
-│
-├── generator/
-│   ├── Dockerfile                   
-│   ├── data_generator.py            
-│   └── requirements-generator.txt  
-│
-├── spark/
-│   ├── Dockerfile                   
-│   ├── entrypoint.sh                
-│   ├── requirements.txt             
-│   ├── spark-config/
-│   │   ├── hive-site.xml            
-│   │   └── core-site.xml            
-│   └── spark-app/
-│       ├── init_hive.py             
-│       ├── cdc_processor.py         
-│       ├── deequ_checks.py          
-│       ├── alert.py                 
-│       └── test_dq_alert.py         
-│
-├── trino/
-│   ├── etc/
-│   │   ├── config.properties
-│   │   ├── jvm.config
-│   │   └── node.properties
-│   └── catalog/
-│       └── hive.properties          
-│
-├── monitoring/
-│   ├── prometheus.yml               
-│   ├── jmx/
-│   │   └── kafka-connect-jmx.yml   
-│   └── grafana/
-│       ├── datasources/
-│       │   └── prometheus.yaml
-│       ├── dashboards/
-│       │   ├── dashboard.yaml
-│       │   └── cdc_pipeline.json   
-│       └── alerting/
-│           └── alerting.yaml        
-│
-└── imgs/
-```
+<p align="center">
+  <img src="./imgs/Architecture.png" width="100%">
+</p>
+
+<p align="center">
+  System Architecture
+</p>
 
 ---
 
-## Getting Started
-### Step 1 — Configure Environment
+# 📁 Repository Structure
+
+```shell
+├── README.md
+├── connectors
+│   ├── debezium-postgres.json
+│   └── s3-sink-minio-production.json
+├── docker-compose.yaml
+├── generator
+│   ├── Dockerfile
+│   ├── data_generator.py
+│   └── requirements-generator.txt
+├── imgs
+│   ├── AKHQ_Topics.png
+│   ├── Architecture.png
+│   ├── Bronze_bucket.png
+│   ├── DataLineage.png
+│   ├── Monitoring.jpg
+│   └── TrinoQuery.png
+├── monitoring
+│   ├── grafana
+│   │   ├── alerting
+│   │   │   └── alerting.yaml
+│   │   ├── dashboards
+│   │   │   ├── cdc_pipeline.json
+│   │   │   └── dashboard.yaml
+│   │   └── datasources
+│   │       └── prometheus.yaml
+│   ├── jmx
+│   │   └── kafka-connect-jmx.yml
+│   └── prometheus.yml
+├── postgres
+│   └── init.sql
+├── register-connectors.sh
+├── spark
+│   ├── Dockerfile
+│   ├── entrypoint.sh
+│   ├── requirements.txt
+│   ├── spark-app
+│   │   ├── alert.py
+│   │   ├── cdc_processor.py
+│   │   ├── deequ_checks.py
+│   │   ├── init_hive.py
+│   │   └── test_dq_alert.py
+│   └── spark-config
+│       ├── core-site.xml
+│       └── hive-site.xml
+└── trino
+    ├── catalog
+    │   └── hive.properties
+    └── etc
+        ├── config.properties
+        ├── jvm.config
+        └── node.properties
+```
+---
+
+# 🚀 Getting Started
+
+1. **Clone the repository**
+
+```bash
+git clone <repository-url>
+cd NorthStream
+```
+
+2. **Configure environment variables**
 
 ```bash
 cp .env.example .env
 ```
 
-| Variable | Default | Description |
-|---|---|---|
-| `MINIO_ROOT_USER` | `admin` | MinIO access key |
-| `MINIO_ROOT_PASSWORD` | `admin123` | MinIO secret key |
-| `PG_USER` | `postgres` | PostgreSQL username |
-| `PG_PASSWORD` | `postgres` | PostgreSQL password |
-| `PAGERDUTY_ROUTING_KEY` | *(empty)* | Optional — alerts are log-only until set |
-
-### Step 2 — Start the Pipeline
+3. **Start the infrastructure**
 
 ```bash
 docker compose up -d --build
 ```
-### Step 3 — Verify Services
+
+4. **Verify running services**
 
 ```bash
 docker compose ps
 ```
-### Step 4 — Register Kafka Connect Connectors
+
+5. **Register Kafka Connect connectors**
 
 ```bash
 bash register-connectors.sh
 ```
 
 The script will:
-1. Wait for MinIO, Schema Registry, and Kafka Connect to be ready
-2. Create `raw` and `bronze` buckets in MinIO
-3. Register the **Debezium PostgreSQL** source connector
-4. Wait for Avro schemas to appear in Schema Registry
-5. Register the **S3 Sink** connector
-6. Print connector status
+- Create MinIO buckets
+- Register Debezium connector
+- Register S3 Sink connector
+- Validate connector status
 
-### Step 5 — Query with Trino
+---
+
+# 🔄 CDC Data Flow
+
+```text
+PostgreSQL
+   ↓
+Debezium
+   ↓
+Kafka
+   ↓
+S3 Sink Connector
+   ↓
+MinIO (raw)
+   ↓
+Spark CDC Processor
+   ↓
+MinIO (bronze)
+   ↓
+Trino
+```
+
+---
+
+# 🔍 Query Data with Trino
 
 ```bash
 docker exec -it trino trino
 ```
 
 ```sql
--- List schemas
 SHOW SCHEMAS FROM hive;
 
--- Switch to northwind
 USE hive.northwind;
 
--- List tables
 SHOW TABLES;
 
--- Query recent orders
-SELECT * FROM orders ORDER BY order_date DESC LIMIT 20;
-
--- Join orders with details
-SELECT o.order_id, o.customer_id, od.product_id, od.unit_price, od.quantity
-FROM orders o
-JOIN order_details od ON o.order_id = od.order_id
-ORDER BY o.order_id DESC
-LIMIT 50;
+SELECT *
+FROM orders
+LIMIT 20;
 ```
 
 ---
+
+# 📊 Monitoring & Alerting
+
+<p align="center">
+  <img src="./imgs/Monitoring.jpg" width="100%">
+</p>
+
+## Data Quality Checks
+
+| Check | Rule |
+|---|---|
+| Non-empty | Table must contain rows |
+| Null PK | No NULL primary keys |
+| Unique PK | No duplicate primary keys |
+| Valid cdc_op | cdc_op ∈ {c, u, r} |
+| Freshness | CDC freshness SLA |
+
+## Alert Rules
+
+| Alert | Condition |
+|---|---|
+| Kafka Consumer Lag | Lag > threshold |
+| Spark Not Running | No metrics update |
+| Freshness SLA Breach | CDC delay > 15 min |
+
+---
+
+# 🌐 Service Interfaces
+
+| Interface | URL |
+|---|---|
+| AKHQ | http://localhost:8090 |
+| MinIO | http://localhost:9001 |
+| Trino | http://localhost:8080 |
+| Grafana | http://localhost:3000 |
+| Prometheus | http://localhost:9090 |
+
+---
+
+# 🖥️ User Interfaces
 
 ## AKHQ UI
 
-![AKHQ UI](imgs/AKHQ_Topics.png)
+<p align="center">
+  <img src="./imgs/AKHQ_Topics.png" width="100%">
+</p>
 
+## MinIO Console
 
-## MinIO Browser UI
+<p align="center">
+  <img src="./imgs/Bronze_bucket.png" width="100%">
+</p>
 
-![MinIO Browser UI](imgs/Bronze_bucket.png)
+## Trino Query UI
 
-## Trino SQL Client UI
-
-![Trino SQL Client UI](imgs/TrinoQuery.png)
-
-## Data Quality & Alerting
-
-### Deequ Checks (Pre-Write Gate)
-
-| Check | Rule | Severity |
-|---|---|---|
-| **Non-empty** | Table must have ≥ 1 row | `error` |
-| **Null PK** | No NULLs in primary key columns | `critical` |
-| **Unique PK** | No duplicate primary keys (composite-aware) | `critical` |
-| **Valid cdc_op** | `cdc_op` ∈ {`c`, `u`, `r`} | `error` |
-| **Freshness** | Latest `cdc_ts_ms` within 15-minute threshold | `error` |
-
-### Grafana Alert Rules
-
-| Alert | Condition | Fires After |
-|---|---|---|
-| **Kafka Consumer Lag** | S3 Sink consumer lag > 1,000 messages | 1 min |
-| **Spark Not Running** | No `cdc_last_run_timestamp_seconds` update for > 10 min | 2 min |
-| **Data Freshness SLA** | `cdc_freshness_gap_seconds` > 900 s (15 min) | 2 min |
-
-All alerts route to PagerDuty via the `PAGERDUTY_ROUTING_KEY` contact point. If the key is not set, alerts are logged but not dispatched.
-
-## Data Quality & Alerting
-![Monitoring UI](imgs/Monitoring.jpg)
-### Running the Alert Test Suite
-
-```bash
-# List available tests
-docker exec spark-cdc /opt/spark/bin/spark-submit \
-  --master local[1] \
-  --jars "/opt/spark/extra-jars/deequ.jar" \
-  /app/test_dq_alert.py --list
-
-# Run DQ failure test (dry-run, no PagerDuty delivery)
-docker exec spark-cdc /opt/spark/bin/spark-submit \
-  --master local[1] \
-  --jars "/opt/spark/extra-jars/hadoop-aws.jar,/opt/spark/extra-jars/aws-java-sdk-bundle.jar,/opt/spark/extra-jars/deequ.jar" \
-  /app/test_dq_alert.py --test t1 --dry-run
-```
-
-| Test | Scenario |
-|---|---|
-| `t1` | DQ failure: null PK, duplicate PK, invalid cdc\_op, empty table |
-| `t2` | Freshness breach → trigger alert → resolve alert |
-| `t3` | Spark death simulation → Grafana Rule 2 fires → restore |
+<p align="center">
+  <img src="./imgs/TrinoQuery.png" width="100%">
+</p>
 
 ---
+# 🙏 Acknowledgements
 
-## Observability
+We would like to sincerely thank our mentor for the guidance, support, and valuable feedback throughout the development of this project.
 
-### Metrics Pipeline
-
-```
-Spark CDC Processor → Pushgateway → Prometheus → Grafana
-Kafka Exporter      ────────────→ Prometheus → Grafana
-JMX Exporter (Debezium) ────────→ Prometheus → Grafana
-```
-
-### Key Metrics
-
-| Metric | Source | Description |
-|---|---|---|
-| `cdc_rows_written_total` | Spark | Deduplicated rows written per table per run |
-| `cdc_processing_duration_seconds` | Spark | Processing time per table |
-| `cdc_freshness_gap_seconds` | Spark | Seconds since last CDC event reached bronze |
-| `cdc_dq_check_status` | Spark | Per-check pass (1) / fail (0) |
-| `cdc_consecutive_failures_total` | Spark | Streak of failed runs without a successful write |
-| `kafka_consumergroup_lag` | Kafka Exporter | Consumer group offset lag |
-| `debezium_metrics_millisecondsbehindource` | JMX | Debezium WAL replication lag |
-
----
-
-## Web UIs
-
-| Interface | URL | Credentials |
-|---|---|---|
-| **AKHQ** (Kafka UI) | http://localhost:8090 | — |
-| **MinIO Console** | http://localhost:9001 | `admin` / `admin123` |
-| **Trino UI** | http://localhost:8080 | — |
-| **Grafana** | http://localhost:3000 | `admin` / `admin` |
-| **Prometheus** | http://localhost:9090 | — |
-| **Pushgateway** | http://localhost:9091 | — |
-
+Your mentorship helped our team better understand modern data engineering concepts and successfully build this real-time CDC pipeline system.
