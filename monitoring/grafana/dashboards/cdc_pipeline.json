@@ -1,0 +1,313 @@
+{
+    "uid": "cdc-pipeline",
+    "title": "CDC Pipeline Monitoring",
+    "refresh": "10s",
+    "schemaVersion": 38,
+    "timezone": "browser",
+    "panels": [
+        {
+            "type": "row",
+            "title": "SLA Overview",
+            "collapsed": false,
+            "gridPos": {
+                "h": 1,
+                "w": 24,
+                "x": 0,
+                "y": 0
+            }
+        },
+        {
+            "type": "gauge",
+            "title": "Data Freshness Gap per Table",
+            "description": "How old is the newest CDC event in bronze? Measures now() - MAX(cdc_ts_ms). Green = fresh (< 5 min), Yellow = degraded (< 15 min), Red = SLA breach (>= 15 min). Alert fires at red.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 1
+            },
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus-ds"
+                    },
+                    "expr": "cdc_freshness_gap_seconds",
+                    "legendFormat": "{{table}}"
+                }
+            ],
+            "options": {
+                "reduceOptions": {
+                    "calcs": [
+                        "lastNotNull"
+                    ]
+                },
+                "showThresholdLabels": true,
+                "showThresholdMarkers": true
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "s",
+                    "min": 0,
+                    "max": 1800,
+                    "noValue": "0",
+                    "color": {
+                        "mode": "thresholds"
+                    },
+                    "thresholds": {
+                        "mode": "absolute",
+                        "steps": [
+                            {
+                                "color": "green",
+                                "value": null
+                            },
+                            {
+                                "color": "yellow",
+                                "value": 300
+                            },
+                            {
+                                "color": "red",
+                                "value": 900
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+        {
+            "type": "timeseries",
+            "title": "S3 Sink Consumer Lag by Topic",
+            "description": "Unconsumed messages in Kafka per topic for the S3 Sink connector. Non-zero lag means Avro files are not yet written to MinIO raw. Sustained lag > 1000 triggers a PagerDuty alert. Line break = kafka-exporter or Kafka Connect is down.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 1
+            },
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus-ds"
+                    },
+                    "expr": "sum by (topic) (kafka_consumergroup_lag{consumergroup=\"connect-minio-s3-sink-connector\"})",
+                    "legendFormat": "{{topic}}"
+                }
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "custom": {
+                        "drawStyle": "line",
+                        "fillOpacity": 20,
+                        "lineWidth": 2,
+                        "spanNulls": false
+                    },
+                    "unit": "short",
+                    "min": 0,
+                    "noValue": "0",
+                    "color": {
+                        "mode": "palette-classic"
+                    }
+                }
+            }
+        },
+        {
+            "type": "timeseries",
+            "title": "New Rows Written to Bronze per Run",
+            "description": "Deduplicated new rows written to bronze in each incremental Spark run. Zero rows = no new events arrived or S3 Sink flush not triggered. Line break = Spark job is down.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 11
+            },
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus-ds"
+                    },
+                    "expr": "cdc_rows_written_total",
+                    "legendFormat": "{{table}}"
+                }
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "custom": {
+                        "drawStyle": "bars",
+                        "fillOpacity": 80,
+                        "spanNulls": false
+                    },
+                    "unit": "none",
+                    "min": 0,
+                    "noValue": "0",
+                    "color": {
+                        "mode": "palette-classic"
+                    }
+                }
+            }
+        },
+        {
+            "type": "timeseries",
+            "title": "Spark Run Duration per Table",
+            "description": "Time Spark spent processing each table per run. Growth over time = increasing batch size or checkpoint not advancing. Line break = Spark job is down.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 11
+            },
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus-ds"
+                    },
+                    "expr": "cdc_processing_duration_seconds",
+                    "legendFormat": "{{table}}"
+                }
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "custom": {
+                        "drawStyle": "line",
+                        "lineWidth": 2,
+                        "spanNulls": false
+                    },
+                    "unit": "s",
+                    "min": 0,
+                    "noValue": "0",
+                    "color": {
+                        "mode": "palette-classic"
+                    }
+                }
+            }
+        },
+        {
+            "type": "timeseries",
+            "title": "Debezium WAL Lag",
+            "description": "Milliseconds Debezium is behind the Postgres WAL, converted to seconds. Line break = kafka-connect JMX scrape is down.",
+            "gridPos": {
+                "h": 8,
+                "w": 8,
+                "x": 0,
+                "y": 19
+            },
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus-ds"
+                    },
+                    "expr": "debezium_metrics_millisecondsbehindource / 1000",
+                    "legendFormat": "WAL lag (s)"
+                }
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "custom": {
+                        "drawStyle": "line",
+                        "lineWidth": 2,
+                        "spanNulls": false
+                    },
+                    "unit": "s",
+                    "min": 0,
+                    "noValue": "0",
+                    "color": {
+                        "mode": "palette-classic"
+                    }
+                }
+            }
+        },
+        {
+            "type": "timeseries",
+            "title": "Debezium Records/min",
+            "description": "Rate of CDC events seen by Debezium over a 5-minute window. Drop to 0 = no change activity or connector stalled. Line break = kafka-connect JMX scrape is down.",
+            "gridPos": {
+                "h": 8,
+                "w": 8,
+                "x": 8,
+                "y": 19
+            },
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus-ds"
+                    },
+                    "expr": "rate(debezium_metrics_totalnumberofeventsseen_total[5m]) * 60",
+                    "legendFormat": "records/min"
+                }
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "custom": {
+                        "drawStyle": "line",
+                        "lineWidth": 2,
+                        "spanNulls": false
+                    },
+                    "unit": "cpm",
+                    "min": 0,
+                    "noValue": "0",
+                    "color": {
+                        "mode": "palette-classic"
+                    }
+                }
+            }
+        },
+        {
+            "type": "timeseries",
+            "title": "Row Pass-Through Ratio (written / read)",
+            "description": "Should be stable near 1.0. Drop below 0.8 = unexpected data loss after dedupe. Line break = Spark job is down.",
+            "gridPos": {
+                "h": 8,
+                "w": 8,
+                "x": 16,
+                "y": 19
+            },
+            "targets": [
+                {
+                    "datasource": {
+                        "type": "prometheus",
+                        "uid": "prometheus-ds"
+                    },
+                    "expr": "cdc_rows_read_total /cdc_rows_written_total",
+                    "legendFormat": "{{table}}"
+                }
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "custom": {
+                        "drawStyle": "line",
+                        "lineWidth": 2,
+                        "spanNulls": false
+                    },
+                    "unit": "percentunit",
+                    "min": 0,
+                    "max": 1,
+                    "noValue": "0",
+                    "color": {
+                        "mode": "palette-classic"
+                    },
+                    "thresholds": {
+                        "mode": "absolute",
+                        "steps": [
+                            {
+                                "color": "red",
+                                "value": null
+                            },
+                            {
+                                "color": "yellow",
+                                "value": 0.8
+                            },
+                            {
+                                "color": "green",
+                                "value": 0.95
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    ]
+}

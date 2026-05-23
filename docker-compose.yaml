@@ -1,8 +1,8 @@
-version: '3.8'
-
 services:
   kafka:
     image: confluentinc/cp-kafka:7.4.0
+    hostname: kafka
+    container_name: kafka
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: 'broker,controller'
@@ -11,16 +11,25 @@ services:
       KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:29092,EXTERNAL://localhost:9092'
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT'
       KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_NUM_PARTITIONS: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_DIRS: '/tmp/kraft-combined-logs'
+      CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
     ports:
       - "9092:9092"
 
   schema-registry:
     image: confluentinc/cp-schema-registry:7.4.0
+    hostname: schema-registry
+    container_name: schema-registry
     depends_on:
       - kafka
     environment:
-      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: '${KAFKA_BOOTSTRAP_SERVERS}'
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: 'PLAINTEXT://kafka:29092'
       SCHEMA_REGISTRY_HOST_NAME: schema-registry
       SCHEMA_REGISTRY_LISTENERS: 'http://0.0.0.0:8081'
     ports:
@@ -28,44 +37,266 @@ services:
 
   kafka-connect:
     image: confluentinc/cp-kafka-connect:7.4.0
+    hostname: kafka-connect
+    container_name: kafka-connect
     depends_on:
       - kafka
       - schema-registry
     environment:
-      CONNECT_BOOTSTRAP_SERVERS: "${KAFKA_BOOTSTRAP_SERVERS}"
+      CONNECT_BOOTSTRAP_SERVERS: kafka:29092
       CONNECT_REST_PORT: 8083
-      CONNECT_GROUP_ID: "cdc-connect-group"
-      CONNECT_CONFIG_STORAGE_TOPIC: "cdc-connect-configs"
-      CONNECT_OFFSET_STORAGE_TOPIC: "cdc-connect-offsets"
-      CONNECT_STATUS_STORAGE_TOPIC: "cdc-connect-status"
-      CONNECT_KEY_CONVERTER: "io.confluent.connect.avro.AvroConverter"
-      CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL: "${SCHEMA_REGISTRY_URL}"
-      CONNECT_VALUE_CONVERTER: "io.confluent.connect.avro.AvroConverter"
-      CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: "${SCHEMA_REGISTRY_URL}"
+      CONNECT_REST_ADVERTISED_HOST_NAME: kafka-connect
+      CONNECT_GROUP_ID: cdc-connect-group
+      CONNECT_CONFIG_STORAGE_TOPIC: cdc-connect-configs
+      CONNECT_OFFSET_STORAGE_TOPIC: cdc-connect-offsets
+      CONNECT_STATUS_STORAGE_TOPIC: cdc-connect-status
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_KEY_CONVERTER: io.confluent.connect.avro.AvroConverter
+      CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      CONNECT_VALUE_CONVERTER: io.confluent.connect.avro.AvroConverter
+      CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      CONNECT_PLUGIN_PATH: /usr/share/java,/usr/share/confluent-hub-components
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      KAFKA_OPTS: "-javaagent:/tmp/jmx-agent/jmx_prometheus_javaagent.jar=7071:/tmp/jmx-config/kafka-connect-jmx.yml"
+    command:
+      - bash
+      - -ec
+      - |
+        set -e
+
+        echo "Preparing JMX exporter..."
+        mkdir -p /tmp/jmx-agent
+
+        echo "Downloading JMX Prometheus agent..."
+        wget -O /tmp/jmx-agent/jmx_prometheus_javaagent.jar \
+          https://repo1.maven.org/maven2/io/prometheus/jmx/jmx_prometheus_javaagent/0.20.0/jmx_prometheus_javaagent-0.20.0.jar
+
+        echo "Verifying JAR..."
+        ls -lh /tmp/jmx-agent/
+        test -s /tmp/jmx-agent/jmx_prometheus_javaagent.jar
+
+        echo "Installing Debezium PostgreSQL connector..."
+        confluent-hub install --no-prompt debezium/debezium-connector-postgresql:2.4.2
+
+        echo "Installing S3 Sink connector..."
+        confluent-hub install --no-prompt confluentinc/kafka-connect-s3:10.5.7
+
+        echo "Starting Kafka Connect..."
+        exec /etc/confluent/docker/run
+    volumes:
+      - ./monitoring/jmx/kafka-connect-jmx.yml:/tmp/jmx-config/kafka-connect-jmx.yml:ro
     ports:
       - "8083:8083"
+      - "7071:7071"
+
+
   akhq:
     image: tchiotludo/akhq
+    hostname: akhq
+    container_name: akhq
     environment:
       AKHQ_CONFIGURATION: |
         akhq:
           connections:
             docker-kafka-server:
               properties:
-                bootstrap.servers: "${KAFKA_BOOTSTRAP_SERVERS}"
+                bootstrap.servers: "kafka:29092"
               schema-registry:
-                url: "${SCHEMA_REGISTRY_URL}"
+                url: "http://schema-registry:8081"
     ports:
-      - "8080:8080"
+      - "8090:8080"
     depends_on:
       - kafka
 
   minio:
     image: minio/minio
+    hostname: minio
+    container_name: minio
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio-data:/data
     ports:
       - "9000:9000"
       - "9001:9001"
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:9000/minio/health/live" ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  postgres-db:
+    image: postgres:15
+    hostname: postgres-db
+    container_name: postgres-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: northwind
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"
+      - "-c"
+      - "max_replication_slots=10"
+      - "-c"
+      - "max_wal_senders=10"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+
+  data-generator:
+    build: ./generator
+    container_name: data-generator
+    depends_on:
+      - postgres-db
+    environment:
+      - SLEEP_INTERVAL=10
+
+  spark-cdc:
+    build: ./spark
+    container_name: spark-cdc
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      - SPARK_VERSION=3.3
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+      - MINIO_ENDPOINT=http://minio:9000
+      - RAW_BUCKET=raw
+      - BRONZE_BUCKET=bronze  
+      - SLEEP_INTERVAL=60
+      - PAGERDUTY_ROUTING_KEY=${PAGERDUTY_ROUTING_KEY}
+    restart: on-failure
+    volumes:
+      - ./spark:/app
+      - ./spark/spark-config/core-site.xml:/opt/spark/conf/core-site.xml
+      - ./spark/spark-config/hive-site.xml:/opt/spark/conf/hive-site.xml
+
+  trino:
+    image: trinodb/trino:435
+    hostname: trino
+    container_name: trino
+    depends_on:
+      - hive-metastore
+    volumes:
+      - ./trino/catalog/hive.properties:/etc/trino/catalog/hive.properties
+    ports:
+      - "8080:8080"
+
+  hive-metastore:
+    container_name: hive-metastore
+    image: "starburstdata/hive:3.1.2-e.18"
+    hostname: hive-metastore
+    ports:
+      - "9083:9083"
+    environment:
+      HIVE_METASTORE_DRIVER: org.postgresql.Driver
+      HIVE_METASTORE_JDBC_URL: jdbc:postgresql://metastore-db:5432/metastore
+      HIVE_METASTORE_USER: hive
+      HIVE_METASTORE_PASSWORD: hive
+      HIVE_METASTORE_WAREHOUSE_DIR: s3://warehouse/
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      S3_PATH_STYLE_ACCESS: "true"
+      REGION: ""
+      GOOGLE_CLOUD_KEY_FILE_PATH: ""
+      AZURE_ADL_CLIENT_ID: ""
+      AZURE_ADL_CREDENTIAL: ""
+      AZURE_ADL_REFRESH_URL: ""
+      AZURE_ABFS_STORAGE_ACCOUNT: ""
+      AZURE_ABFS_ACCESS_KEY: ""
+      AZURE_WASB_STORAGE_ACCOUNT: ""
+      AZURE_ABFS_OAUTH: ""
+      AZURE_ABFS_OAUTH_TOKEN_PROVIDER: ""
+      AZURE_ABFS_OAUTH_CLIENT_ID: ""
+      AZURE_ABFS_OAUTH_SECRET: ""
+      AZURE_ABFS_OAUTH_ENDPOINT: ""
+      AZURE_WASB_ACCESS_KEY: ""
+    depends_on:
+      - metastore-db
+  metastore-db:
+    image: postgres:15
+    hostname: metastore-db
+    container_name: metastore-db
+    environment:
+      POSTGRES_USER: hive
+      POSTGRES_PASSWORD: hive
+      POSTGRES_DB: metastore
+    ports:
+      - "5433:5432"
+    volumes:
+      - metastore_db_data:/var/lib/postgresql/data
+
+  pushgateway:
+    image: prom/pushgateway:v1.8.0
+    hostname: pushgateway
+    container_name: pushgateway
+    ports:
+      - "9091:9091"
+
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    hostname: prometheus
+    container_name: prometheus
+    depends_on:
+      - pushgateway
+      - kafka-exporter
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    hostname: grafana
+    container_name: grafana
+    depends_on:
+      - prometheus
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - PAGERDUTY_ROUTING_KEY=${PAGERDUTY_ROUTING_KEY}
+      - GF_ALERTING_ENABLED=false
+      - GF_UNIFIED_ALERTING_ENABLED=true
+    volumes:
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/alerting:/etc/grafana/provisioning/alerting
+      - grafana_data:/var/lib/grafana
+
+  kafka-exporter:
+    image: danielqsj/kafka-exporter
+    hostname: kafka-exporter
+    container_name: kafka-exporter
+    depends_on:
+      - kafka
+    command:
+      - --kafka.server=kafka:29092
+    ports:
+      - "9308:9308"
+    restart: on-failure
+
+volumes:
+  postgres_data:
+  minio-data:
+  trino_metastore:
+  prometheus_data:
+  grafana_data:
+  metastore_db_data:

@@ -1,65 +1,257 @@
-# CDC Northwind Pipeline
+# 🌊 NorthStream - Real-Time CDC Data Replication Pipeline
 
-## Overview
-This is the root repository for the Northwind CDC (Change Data Capture) Pipeline. It acts as the structural foundation and contract between the Source, Backbone, and Sink teams.
-
-## Structure
-- `docs/`: Critical architecture and contract definitions.
-- `docker-compose.yaml`: The single source of truth for local infrastructure (Backbone-owned).
-- `connectors/`: Integration boundary for Source and Sink configurations.
-- `scripts/`: Shared standalone utilities.
-
-## Getting Started
-1. Review `docs/architecture.md` and `docs/contracts.md`.
-2. Copy `.env.example` to `.env` and provide your local configurations.
-3. Bring up the infrastructure (Requires `docker-compose`).
-
-
-# Source Team (M1) — Postgres + Debezium
-
-**Owner:** Thành viên 1 | **Branch:** `feature/source-postgres`
+> A PoC CDC platform for replicating PostgreSQL operational data into an isolated analytics environment using Debezium, Kafka, Spark, MinIO, Trino, and Grafana.
 
 ---
 
-## Đã làm gì
+# 💥 Challenge: Unsafe Debugging on Production Systems
 
-- Thêm service `postgres-db` vào `docker-compose.yaml` với `wal_level=logical`, `max_replication_slots=10`
-- Tạo `postgres/init.sql` chứa toàn bộ schema Northwind (14 bảng) + sample data + `REPLICA IDENTITY FULL` cho 4 bảng CDC
-- Deploy Debezium connector (`inventory-connector`) theo dõi 4 bảng: `orders`, `order_details`, `products`, `customers`
-- Connector status: **RUNNING** ✅
+Developers often need production-like data for debugging and testing.
+
+However, traditional approaches are inefficient and risky:
+- Data replication is slow and quickly becomes outdated
+- Production incidents are difficult to reproduce
+- Direct queries on production systems may impact performance and stability
+
+Therefore, organizations need an isolated environment that provides near real-time operational data without affecting production systems.
 
 ---
 
-## Thông tin quan trọng cho M2 và M3
+# ✅ Solution
 
-| Thông tin | Giá trị |
+NorthStream provides a real-time CDC replication platform that continuously synchronizes PostgreSQL data into an isolated analytics environment.
+
+---
+
+# 🛠️ Technology Stack
+
+| Layer | Technologies |
 |---|---|
-| Topic pattern | `northwind.public.<tên_bảng>` |
-| Key/Value format | **Avro** (AvroConverter) |
-| Schema Registry | `http://schema-registry:8081` |
-| 4 topic chính | `northwind.public.orders` (4p), `northwind.public.order_details` (4p), `northwind.public.products` (2p), `northwind.public.customers` (2p) |
+| CDC | Debezium, Kafka Connect |
+| Streaming | Apache Kafka |
+| Storage | MinIO |
+| Processing | Apache Spark |
+| Data Quality | Deequ |
+| Query Engine | Trino |
+| Monitoring | Prometheus, Grafana |
+| Alerting | PagerDuty |
+| Containerization | Docker Compose |
 
 ---
 
-## Lưu ý khi gặp sự cố
+# 🌟 System Architecture
 
-**Kafka không start** → Dùng `CLUSTER_ID` (không phải `KAFKA_CLUSTER_ID`) trong docker-compose
+<p align="center">
+  <img src="./imgs/Architecture.png" width="100%">
+</p>
 
-**Kafka Connect crash** → Phải có 3 dòng replication factor = 1:
-```yaml
-CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: "1"
-CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: "1"
-CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: "1"
+<p align="center">
+  System Architecture
+</p>
+
+---
+
+# 📁 Repository Structure
+
+```shell
+├── README.md
+├── connectors
+│   ├── debezium-postgres.json
+│   └── s3-sink-minio-production.json
+├── docker-compose.yaml
+├── generator
+│   ├── Dockerfile
+│   ├── data_generator.py
+│   └── requirements-generator.txt
+├── imgs
+│   ├── AKHQ_Topics.png
+│   ├── Architecture.png
+│   ├── Bronze_bucket.png
+│   ├── DataLineage.png
+│   ├── Monitoring.jpg
+│   └── TrinoQuery.png
+├── monitoring
+│   ├── grafana
+│   │   ├── alerting
+│   │   │   └── alerting.yaml
+│   │   ├── dashboards
+│   │   │   ├── cdc_pipeline.json
+│   │   │   └── dashboard.yaml
+│   │   └── datasources
+│   │       └── prometheus.yaml
+│   ├── jmx
+│   │   └── kafka-connect-jmx.yml
+│   └── prometheus.yml
+├── postgres
+│   └── init.sql
+├── register-connectors.sh
+├── spark
+│   ├── Dockerfile
+│   ├── entrypoint.sh
+│   ├── requirements.txt
+│   ├── spark-app
+│   │   ├── alert.py
+│   │   ├── cdc_processor.py
+│   │   ├── deequ_checks.py
+│   │   ├── init_hive.py
+│   │   └── test_dq_alert.py
+│   └── spark-config
+│       ├── core-site.xml
+│       └── hive-site.xml
+└── trino
+    ├── catalog
+    │   └── hive.properties
+    └── etc
+        ├── config.properties
+        ├── jvm.config
+        └── node.properties
+```
+---
+
+# 🚀 Getting Started
+
+1. **Clone the repository**
+
+```bash
+git clone <repository-url>
+cd NorthStream
 ```
 
-**Debezium chưa cài** → `kafka-connect` cần thêm command cài plugin khi start:
-```yaml
-command:
-  - bash
-  - -c
-  - |
-    confluent-hub install --no-prompt debezium/debezium-connector-postgresql:2.4.2
-    /etc/confluent/docker/run
+2. **Configure environment variables**
+
+```bash
+cp .env.example .env
 ```
 
-**Postgres volume cũ** → Chạy `docker compose down -v` trước khi up lại để `init.sql` chạy lại từ đầu
+3. **Start the infrastructure**
+
+```bash
+docker compose up -d --build
+```
+
+4. **Verify running services**
+
+```bash
+docker compose ps
+```
+
+5. **Register Kafka Connect connectors**
+
+```bash
+bash register-connectors.sh
+```
+
+The script will:
+- Create MinIO buckets
+- Register Debezium connector
+- Register S3 Sink connector
+- Validate connector status
+
+---
+
+# 🔄 CDC Data Flow
+
+```text
+PostgreSQL
+   ↓
+Debezium
+   ↓
+Kafka
+   ↓
+S3 Sink Connector
+   ↓
+MinIO (raw)
+   ↓
+Spark CDC Processor
+   ↓
+MinIO (bronze)
+   ↓
+Trino
+```
+
+---
+
+# 🔍 Query Data with Trino
+
+```bash
+docker exec -it trino trino
+```
+
+```sql
+SHOW SCHEMAS FROM hive;
+
+USE hive.northwind;
+
+SHOW TABLES;
+
+SELECT *
+FROM orders
+LIMIT 20;
+```
+
+---
+
+# 📊 Monitoring & Alerting
+
+<p align="center">
+  <img src="./imgs/Monitoring.jpg" width="100%">
+</p>
+
+## Data Quality Checks
+
+| Check | Rule |
+|---|---|
+| Non-empty | Table must contain rows |
+| Null PK | No NULL primary keys |
+| Unique PK | No duplicate primary keys |
+| Valid cdc_op | cdc_op ∈ {c, u, r} |
+| Freshness | CDC freshness SLA |
+
+## Alert Rules
+
+| Alert | Condition |
+|---|---|
+| Kafka Consumer Lag | Lag > threshold |
+| Spark Not Running | No metrics update |
+| Freshness SLA Breach | CDC delay > 15 min |
+
+---
+
+# 🌐 Service Interfaces
+
+| Interface | URL |
+|---|---|
+| AKHQ | http://localhost:8090 |
+| MinIO | http://localhost:9001 |
+| Trino | http://localhost:8080 |
+| Grafana | http://localhost:3000 |
+| Prometheus | http://localhost:9090 |
+
+---
+
+# 🖥️ User Interfaces
+
+## AKHQ UI
+
+<p align="center">
+  <img src="./imgs/AKHQ_Topics.png" width="100%">
+</p>
+
+## MinIO Console
+
+<p align="center">
+  <img src="./imgs/Bronze_bucket.png" width="100%">
+</p>
+
+## Trino Query UI
+
+<p align="center">
+  <img src="./imgs/TrinoQuery.png" width="100%">
+</p>
+
+---
+# 🙏 Acknowledgements
+
+We would like to sincerely thank our mentor for the guidance, support, and valuable feedback throughout the development of this project.
+
+Your mentorship helped our team better understand modern data engineering concepts and successfully build this real-time CDC pipeline system.
