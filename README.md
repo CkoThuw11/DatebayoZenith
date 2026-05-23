@@ -49,7 +49,19 @@ NorthStream provides a real-time CDC replication platform that continuously sync
   System Architecture
 </p>
 
+
 ---
+
+# 🗄️ Data Lineage
+
+<p align="center">
+  <img src="./imgs/DataLineage.png" width="100%">
+</p>
+
+<p align="center">
+  Data Lineage
+</p>
+
 
 # 📁 Repository Structure
 
