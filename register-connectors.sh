@@ -11,7 +11,7 @@ echo " MinIO is ready!"
 
 # ─── 2. Create bronze bucket ──────────────────────────────────────────────────
 echo "Creating MinIO bucket..."
-docker run --rm --network datebayozenith_default \
+MSYS_NO_PATHCONV=1 docker run --rm --network datebayozenith_default \
   --entrypoint /bin/sh minio/mc \
   -c "mc alias set local http://minio:9000 admin admin123 \
       && (mc ls local/raw    > /dev/null 2>&1 || mc mb local/raw) \
@@ -65,11 +65,11 @@ echo "========================================="
 
 echo ""
 echo "Debezium Connector Status:"
-curl -s http://localhost:8083/connectors/source-postgres-debezium/status | python3 -m json.tool
+curl -s http://localhost:8083/connectors/source-postgres-debezium/status
 
 echo ""
 echo "S3 Sink Connector Status:"
-curl -s http://localhost:8083/connectors/minio-s3-sink-connector/status | python3 -m json.tool
+curl -s http://localhost:8083/connectors/minio-s3-sink-connector/status
 
 echo ""
 echo "Pipeline ready! PostgreSQL changes will flow to MinIO bronze bucket."
