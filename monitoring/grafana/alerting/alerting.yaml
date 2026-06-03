@@ -1,228 +1,598 @@
 apiVersion: 1
-
-contactPoints:
-  - orgId: 1
-    name: PagerDuty CDC Alerts
-    receivers:
-      - uid: pagerduty-cdc-receiver
-        type: pagerduty
-        settings:
-          integrationKey: "${PAGERDUTY_ROUTING_KEY}"
-          url: "https://events.eu.pagerduty.com/v2/enqueue"
-        disableResolveMessage: false
-
-# ─── Notification Policies ────────────────────────────────────────────────────
-policies:
-  - orgId: 1
-    receiver: PagerDuty CDC Alerts
-    group_by:
-      - alertname
-      - table
-    group_wait: 30s
-    group_interval: 5m
-    repeat_interval: 4h
-
 groups:
-  - orgId: 1
-    name: CDC Infrastructure
-    folder: CDC Monitoring
-    interval: 1m
-    rules:
+    - orgId: 1
+      name: 1-minute-checks
+      folder: CDC Monitoring
+      interval: 1m
+      rules:
+        - uid: dfnwmst7aaupse
+          title: "\U0001F534 SEV-1 (Critical)"
+          condition: C
+          data:
+            - refId: A
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: prometheus-ds
+              model:
+                disableTextWrap: false
+                editorMode: code
+                expr: debezium_metrics_millisecondsbehindource{connector="northwind"}
+                fullMetaSearch: false
+                includeNullMetadata: true
+                instant: true
+                intervalMs: 1000
+                legendFormat: __auto
+                maxDataPoints: 43200
+                range: false
+                refId: A
+                useBackend: false
+            - refId: B
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                conditions:
+                    - evaluator:
+                        params: []
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - B
+                      reducer:
+                        params: []
+                        type: last
+                      type: query
+                datasource:
+                    type: __expr__
+                    uid: __expr__
+                expression: A
+                intervalMs: 1000
+                maxDataPoints: 43200
+                reducer: last
+                refId: B
+                type: reduce
+            - refId: C
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                conditions:
+                    - evaluator:
+                        params:
+                            - 3.6e+06
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - C
+                      reducer:
+                        params: []
+                        type: last
+                      type: query
+                datasource:
+                    type: __expr__
+                    uid: __expr__
+                expression: B
+                intervalMs: 1000
+                maxDataPoints: 43200
+                refId: C
+                type: threshold
+          noDataState: NoData
+          execErrState: Error
+          for: 0s
+          annotations: {}
+          labels:
+            severity: critical
+            team: infra
+          isPaused: false
+        - uid: afnwnrst60nb4a
+          title: "\U0001F7E0 SEV-2 (High)"
+          condition: C
+          data:
+            - refId: A
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: prometheus-ds
+              model:
+                editorMode: code
+                expr: max by (topic) (kafka_consumergroup_lag)
+                instant: true
+                intervalMs: 1000
+                legendFormat: __auto
+                maxDataPoints: 43200
+                range: false
+                refId: A
+            - refId: B
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                conditions:
+                    - evaluator:
+                        params: []
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - B
+                      reducer:
+                        params: []
+                        type: last
+                      type: query
+                datasource:
+                    type: __expr__
+                    uid: __expr__
+                expression: A
+                intervalMs: 1000
+                maxDataPoints: 43200
+                reducer: last
+                refId: B
+                type: reduce
+            - refId: C
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                conditions:
+                    - evaluator:
+                        params:
+                            - 5000
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - C
+                      reducer:
+                        params: []
+                        type: last
+                      type: query
+                datasource:
+                    type: __expr__
+                    uid: __expr__
+                expression: B
+                intervalMs: 1000
+                maxDataPoints: 43200
+                refId: C
+                type: threshold
+          noDataState: NoData
+          execErrState: Error
+          for: 5m
+          annotations: {}
+          labels:
+            severity: high
+            team: infra
+          isPaused: false
+        - uid: ffnwnuti6gfeoe
+          title: "\U0001F7E1 SEV-3 (Moderate)"
+          condition: C
+          data:
+            - refId: A
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: prometheus-ds
+              model:
+                editorMode: code
+                expr: jvm_memory_bytes_used{area="heap"} / jvm_memory_bytes_max{area="heap"}
+                instant: true
+                intervalMs: 1000
+                legendFormat: __auto
+                maxDataPoints: 43200
+                range: false
+                refId: A
+            - refId: B
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                conditions:
+                    - evaluator:
+                        params: []
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - B
+                      reducer:
+                        params: []
+                        type: last
+                      type: query
+                datasource:
+                    type: __expr__
+                    uid: __expr__
+                expression: A
+                intervalMs: 1000
+                maxDataPoints: 43200
+                reducer: last
+                refId: B
+                type: reduce
+            - refId: C
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                conditions:
+                    - evaluator:
+                        params:
+                            - 0.85
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - C
+                      reducer:
+                        params: []
+                        type: last
+                      type: query
+                datasource:
+                    type: __expr__
+                    uid: __expr__
+                expression: B
+                intervalMs: 1000
+                maxDataPoints: 43200
+                refId: C
+                type: threshold
+          noDataState: NoData
+          execErrState: Error
+          for: 15m
+          annotations: {}
+          labels:
+            severity: severity
+            team: infra
+          isPaused: false
+        - uid: cfnwo0t0ukjy8b
+          title: "\U0001F535 SEV-4 (Low)"
+          condition: C
+          data:
+            - refId: A
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: prometheus-ds
+              model:
+                editorMode: code
+                expr: up{instance="kafka-connect:7071"}
+                instant: true
+                intervalMs: 1000
+                legendFormat: __auto
+                maxDataPoints: 43200
+                range: false
+                refId: A
+            - refId: B
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                conditions:
+                    - evaluator:
+                        params: []
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - B
+                      reducer:
+                        params: []
+                        type: last
+                      type: query
+                datasource:
+                    type: __expr__
+                    uid: __expr__
+                expression: A
+                intervalMs: 1000
+                maxDataPoints: 43200
+                reducer: last
+                refId: B
+                type: reduce
+            - refId: C
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                conditions:
+                    - evaluator:
+                        params:
+                            - 1
+                        type: lt
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - C
+                      reducer:
+                        params: []
+                        type: last
+                      type: query
+                datasource:
+                    type: __expr__
+                    uid: __expr__
+                expression: B
+                intervalMs: 1000
+                maxDataPoints: 43200
+                refId: C
+                type: threshold
+          noDataState: NoData
+          execErrState: Error
+          for: 0s
+          annotations: {}
+          labels:
+            severity: low
+            team: infra
+          isPaused: false
+    - orgId: 1
+      name: CDC Infrastructure
+      folder: CDC Monitoring
+      interval: 1m
+      rules:
+        - uid: cdc-kafka-lag-alert
+          title: CDC Kafka Consumer Lag Too High
+          condition: C
+          data:
+            - refId: A
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: prometheus-ds
+              model:
+                expr: max by (topic) (kafka_consumergroup_lag{consumergroup="connect-minio-s3-sink-connector"})
+                instant: true
+                intervalMs: 1000
+                maxDataPoints: 43200
+                refId: A
+            - refId: B
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                expression: A
+                hide: false
+                intervalMs: 1000
+                maxDataPoints: 43200
+                reducer: max
+                refId: B
+                type: reduce
+            - refId: C
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                conditions:
+                    - evaluator:
+                        params:
+                            - 1000
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - B
+                      reducer:
+                        params: []
+                        type: last
+                      type: query
+                expression: B
+                hide: false
+                intervalMs: 1000
+                maxDataPoints: 43200
+                refId: C
+                type: threshold
+          dashboardUid: ""
+          panelId: 0
+          noDataState: NoData
+          execErrState: Error
+          for: 1m
+          annotations:
+            description: |
+                component: kafka/s3-sink-connector
+                consumer_group: connect-minio-s3-sink-connector
 
-      # ── Rule 1: Kafka Consumer Lag > 1000 ────────────────────────────────
-      - uid: cdc-kafka-lag-alert
-        title: "CDC Kafka Consumer Lag Too High"
-        condition: C
-        data:
-          - refId: A
-            relativeTimeRange: { from: 600, to: 0 }
-            datasourceUid: prometheus-ds
-            model:
-              expr: max by (topic) (kafka_consumergroup_lag{consumergroup="connect-minio-s3-sink-connector"})
-              instant: true
-              intervalMs: 1000
-              maxDataPoints: 43200
-              refId: A
-          - refId: B
-            relativeTimeRange: { from: 600, to: 0 }
-            datasourceUid: "__expr__"
-            model:
-              expression: A
-              hide: false
-              reducer: max
-              refId: B
-              type: reduce
-          - refId: C
-            relativeTimeRange: { from: 600, to: 0 }
-            datasourceUid: "__expr__"
-            model:
-              conditions:
-                - evaluator: { params: [1000], type: gt }
-                  operator: { type: and }
-                  query: { params: [B] }
-                  reducer: { params: [], type: last }
-                  type: query
-              expression: B
-              hide: false
-              refId: C
-              type: threshold
-        noDataState: NoData
-        execErrState: Error
-        for: 1m
-        annotations:
-          summary: "[CDC Kafka] S3 Sink consumer lag is {{ $values.B.Value | humanize }} messages (threshold: 1000) — bronze writes are stalling"
-          description: |
-            component: kafka/s3-sink-connector
-            consumer_group: connect-minio-s3-sink-connector
+                lag_messages: {{ $values.B.Value }}
+                threshold: 1000
+                affected_topics: orders, order_details, products
 
-            lag_messages: {{ $values.B.Value }}
-            threshold: 1000
-            affected_topics: orders, order_details, products
+                dashboard_url: "http://localhost:3000/d/cdc-pipeline?viewPanel=2"
+                steps: |
+                  1. Check S3 Sink connector status:
+                     curl http://localhost:8083/connectors/minio-s3-sink-connector/status
+                  2. Check Kafka Connect logs:
+                     docker logs kafka-connect --tail 100
+                  3. If connector is FAILED, restart it:
+                     curl -X POST http://localhost:8083/connectors/minio-s3-sink-connector/restart
+            runbook_url: http://localhost:3000/d/cdc-pipeline?viewPanel=2
+            summary: '[CDC Kafka] S3 Sink consumer lag is {{ $values.B.Value | humanize }} messages (threshold: 1000) — bronze writes are stalling'
+          labels:
+            component: kafka
+            group: data-engineering
+            pipeline: northwind-cdc
+            severity: critical
+          isPaused: false
+        - uid: cdc-spark-stale-alert
+          title: CDC Spark Processor Not Running
+          condition: C
+          data:
+            - refId: A
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: prometheus-ds
+              model:
+                expr: time() - cdc_last_run_timestamp_seconds{table=~".+"}
+                instant: true
+                intervalMs: 1000
+                maxDataPoints: 43200
+                refId: A
+            - refId: B
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                expression: A
+                hide: false
+                intervalMs: 1000
+                maxDataPoints: 43200
+                reducer: max
+                refId: B
+                type: reduce
+            - refId: C
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                conditions:
+                    - evaluator:
+                        params:
+                            - 600
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - B
+                      reducer:
+                        params: []
+                        type: last
+                      type: query
+                expression: B
+                hide: false
+                intervalMs: 1000
+                maxDataPoints: 43200
+                refId: C
+                type: threshold
+          dashboardUid: ""
+          panelId: 0
+          noDataState: NoData
+          execErrState: Error
+          for: 2m
+          annotations:
+            description: |
+                component: spark/cdc-processor
+                container: spark-cdc
 
-            dashboard_url: "http://localhost:3000/d/cdc-pipeline?viewPanel=2"
-            steps: |
-              1. Check S3 Sink connector status:
-                 curl http://localhost:8083/connectors/minio-s3-sink-connector/status
-              2. Check Kafka Connect logs:
-                 docker logs kafka-connect --tail 100
-              3. If connector is FAILED, restart it:
-                 curl -X POST http://localhost:8083/connectors/minio-s3-sink-connector/restart
-          runbook_url: "http://localhost:3000/d/cdc-pipeline?viewPanel=2"
-        labels:
-          severity: critical
-          component: kafka
-          group: data-engineering
-          pipeline: northwind-cdc
-        isPaused: false
+                silence_duration: {{ $values.B.Value | humanizeDuration }}
+                threshold: 10 minutes
+                metric: cdc_last_run_timestamp_seconds (no update received)
 
-      # ── Rule 2: Spark not running > 10 minutes ────────────────────────────
-      - uid: cdc-spark-stale-alert
-        title: "CDC Spark Processor Not Running"
-        condition: C
-        data:
-          - refId: A
-            relativeTimeRange: { from: 600, to: 0 }
-            datasourceUid: prometheus-ds
-            model:
-              expr: time() - cdc_last_run_timestamp_seconds{table=~".+"}
-              instant: true
-              intervalMs: 1000
-              maxDataPoints: 43200
-              refId: A
-          - refId: B
-            relativeTimeRange: { from: 600, to: 0 }
-            datasourceUid: "__expr__"
-            model:
-              expression: A
-              hide: false
-              reducer: max
-              refId: B
-              type: reduce
-          - refId: C
-            relativeTimeRange: { from: 600, to: 0 }
-            datasourceUid: "__expr__"
-            model:
-              conditions:
-                - evaluator: { params: [600], type: gt }
-                  operator: { type: and }
-                  query: { params: [B] }
-                  reducer: { params: [], type: last }
-                  type: query
-              expression: B
-              hide: false
-              refId: C
-              type: threshold
-        noDataState: NoData
-        execErrState: Error
-        for: 2m
-        annotations:
-          summary: "[CDC Spark] Processor has not run for {{ $values.B.Value | humanizeDuration }} (threshold: 10 min) — bronze writes are stopped"
-          description: |
-            component: spark/cdc-processor
-            container: spark-cdc
+                dashboard_url: "http://localhost:3000/d/cdc-pipeline?viewPanel=4"
+                steps: |
+                  1. Check if the container is still running:
+                     docker ps | grep spark-cdc
+                  2. Check container logs for crash or OOM:
+                     docker logs spark-cdc --tail 100
+                  3. Restart if crashed:
+                     docker compose restart spark-cdc
+                  4. If restarted, verify metrics resume within 2 minutes:
+                     curl -s pushgateway:9091/metrics | grep cdc_last_run
+            runbook_url: http://localhost:3000/d/cdc-pipeline?viewPanel=4
+            summary: '[CDC Spark] Processor has not run for {{ $values.B.Value | humanizeDuration }} (threshold: 10 min) — bronze writes are stopped'
+          labels:
+            component: spark
+            group: infrastructure
+            pipeline: northwind-cdc
+            severity: critical
+          isPaused: false
+        - uid: cdc-freshness-breach-alert
+          title: CDC Data Freshness SLA Breach
+          condition: C
+          data:
+            - refId: A
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: prometheus-ds
+              model:
+                expr: cdc_freshness_gap_seconds{table=~".+"}
+                instant: true
+                intervalMs: 1000
+                maxDataPoints: 43200
+                refId: A
+            - refId: B
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                expression: A
+                hide: false
+                intervalMs: 1000
+                maxDataPoints: 43200
+                reducer: max
+                refId: B
+                type: reduce
+            - refId: C
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                conditions:
+                    - evaluator:
+                        params:
+                            - 900
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - B
+                      reducer:
+                        params: []
+                        type: last
+                      type: query
+                expression: B
+                hide: false
+                intervalMs: 1000
+                maxDataPoints: 43200
+                refId: C
+                type: threshold
+          dashboardUid: ""
+          panelId: 0
+          noDataState: NoData
+          execErrState: Error
+          for: 2m
+          annotations:
+            description: |
+                component: spark/freshness_check
+                table: {{ $labels.table }}
 
-            silence_duration: {{ $values.B.Value | humanizeDuration }}
-            threshold: 10 minutes
-            metric: cdc_last_run_timestamp_seconds (no update received)
+                freshness_gap: {{ $values.B.Value | humanizeDuration }}
+                threshold: 15 minutes (900 seconds)
 
-            dashboard_url: "http://localhost:3000/d/cdc-pipeline?viewPanel=4"
-            steps: |
-              1. Check if the container is still running:
-                 docker ps | grep spark-cdc
-              2. Check container logs for crash or OOM:
-                 docker logs spark-cdc --tail 100
-              3. Restart if crashed:
-                 docker compose restart spark-cdc
-              4. If restarted, verify metrics resume within 2 minutes:
-                 curl -s pushgateway:9091/metrics | grep cdc_last_run
-          runbook_url: "http://localhost:3000/d/cdc-pipeline?viewPanel=4"
-        labels:
-          severity: critical
-          component: spark
-          group: infrastructure
-          pipeline: northwind-cdc
-        isPaused: false
-      - uid: cdc-freshness-breach-alert
-        title: "CDC Data Freshness SLA Breach"
-        condition: C
-        data:
-          - refId: A
-            relativeTimeRange: { from: 600, to: 0 }
-            datasourceUid: prometheus-ds
-            model:
-              expr: cdc_freshness_gap_seconds{table=~".+"}
-              instant: true
-              intervalMs: 1000
-              maxDataPoints: 43200
-              refId: A
-          - refId: B
-            relativeTimeRange: { from: 600, to: 0 }
-            datasourceUid: "__expr__"
-            model:
-              expression: A
-              hide: false
-              reducer: max
-              refId: B
-              type: reduce
-          - refId: C
-            relativeTimeRange: { from: 600, to: 0 }
-            datasourceUid: "__expr__"
-            model:
-              conditions:
-                - evaluator: { params: [900], type: gt }   # 900s = 15 phút
-                  operator: { type: and }
-                  query: { params: [B] }
-                  reducer: { params: [], type: last }
-                  type: query
-              expression: B
-              hide: false
-              refId: C
-              type: threshold
-        noDataState: NoData
-        execErrState: Error
-        for: 2m
-        annotations:
-          summary: "[CDC Freshness] Table {{ $labels.table }} is {{ $values.B.Value | humanizeDuration }} stale (SLA: 15 min)"
-          description: |
-            component: spark/freshness_check
-            table: {{ $labels.table }}
-
-            freshness_gap: {{ $values.B.Value | humanizeDuration }}
-            threshold: 15 minutes (900 seconds)
-
-            dashboard_url: "http://localhost:3000/d/cdc-pipeline?var-table={{ $labels.table }}"
-            steps: |
-              1. Check last successful Spark run:
-                curl -s pushgateway:9091/metrics | grep cdc_last_run_timestamp
-              2. Check if Spark is running:
-                docker ps | grep spark-cdc
-              3. Check Spark logs for DQ failure blocking writes:
-                docker logs spark-cdc --tail 100
-              4. If DQ is blocking writes, inspect quarantine data and fix upstream source.
-          runbook_url: "http://localhost:3000/d/cdc-pipeline"
-        labels:
-          severity: critical
-          component: spark
-          group: data-quality
-          pipeline: northwind-cdc
-        isPaused: false
+                dashboard_url: "http://localhost:3000/d/cdc-pipeline?var-table={{ $labels.table }}"
+                steps: |
+                  1. Check last successful Spark run:
+                    curl -s pushgateway:9091/metrics | grep cdc_last_run_timestamp
+                  2. Check if Spark is running:
+                    docker ps | grep spark-cdc
+                  3. Check Spark logs for DQ failure blocking writes:
+                    docker logs spark-cdc --tail 100
+                  4. If DQ is blocking writes, inspect quarantine data and fix upstream source.
+            runbook_url: http://localhost:3000/d/cdc-pipeline
+            summary: '[CDC Freshness] Table {{ $labels.table }} is {{ $values.B.Value | humanizeDuration }} stale (SLA: 15 min)'
+          labels:
+            component: spark
+            group: data-quality
+            pipeline: northwind-cdc
+            severity: critical
+          isPaused: false
