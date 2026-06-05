@@ -111,6 +111,35 @@ services:
     depends_on:
       - kafka
 
+  webhook-receiver:
+    build: ./alerting
+    container_name: webhook-receiver
+    ports:
+      - "5001:5001"
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+    depends_on:
+      - kafka
+    restart: on-failure
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5001/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  kafka-alert-consumer:
+    build: ./alerting
+    container_name: kafka-alert-consumer
+    command: python kafka_alert_consumer.py
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - PAGERDUTY_ROUTING_KEY_INFRA=${PAGERDUTY_ROUTING_KEY_INFRA}
+      - PAGERDUTY_ROUTING_KEY_DQ=${PAGERDUTY_ROUTING_KEY_DQ}
+    depends_on:
+      - kafka
+    restart: on-failure
+    
   minio:
     image: minio/minio
     hostname: minio
@@ -167,6 +196,8 @@ services:
     depends_on:
       minio:
         condition: service_healthy
+      hive-metastore:
+        condition: service_healthy
     environment:
       - SPARK_VERSION=3.3
       - MINIO_ROOT_USER=${MINIO_ROOT_USER}
@@ -175,7 +206,6 @@ services:
       - RAW_BUCKET=raw
       - BRONZE_BUCKET=bronze  
       - SLEEP_INTERVAL=60
-      - PAGERDUTY_ROUTING_KEY=${PAGERDUTY_ROUTING_KEY}
     restart: on-failure
     volumes:
       - ./spark:/app
@@ -187,7 +217,8 @@ services:
     hostname: trino
     container_name: trino
     depends_on:
-      - hive-metastore
+      hive-metastore:
+        condition: service_healthy
     volumes:
       - ./trino/catalog/hive.properties:/etc/trino/catalog/hive.properties
     ports:
@@ -224,7 +255,15 @@ services:
       AZURE_ABFS_OAUTH_ENDPOINT: ""
       AZURE_WASB_ACCESS_KEY: ""
     depends_on:
-      - metastore-db
+      metastore-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/9083"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
   metastore-db:
     image: postgres:15
     hostname: metastore-db
@@ -237,6 +276,12 @@ services:
       - "5433:5432"
     volumes:
       - metastore_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hive -d metastore"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
   pushgateway:
     image: prom/pushgateway:v1.8.0
@@ -272,7 +317,6 @@ services:
     environment:
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=admin
-      - PAGERDUTY_ROUTING_KEY=${PAGERDUTY_ROUTING_KEY}
       - GF_ALERTING_ENABLED=false
       - GF_UNIFIED_ALERTING_ENABLED=true
     volumes:
