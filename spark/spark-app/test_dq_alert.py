@@ -1,27 +1,55 @@
 """
-test_dq_alert.py — CDC Pipeline Alert Test Suite
--------------------------------------------------
+test_dq_alert.py — CDC Pipeline Alert Test Suite (t1 + t2)
+-----------------------------------------------------------
 Run inside the spark-cdc container via spark-submit:
 
-  # Run a specific test
   docker exec spark-cdc /opt/spark/bin/spark-submit \\
     --master local[1] \\
     --jars "/opt/spark/extra-jars/hadoop-aws.jar,/opt/spark/extra-jars/aws-java-sdk-bundle.jar,/opt/spark/extra-jars/deequ.jar" \\
     /app/test_dq_alert.py --test t1
 
-  # List available tests
-  docker exec spark-cdc /opt/spark/bin/spark-submit ... /app/test_dq_alert.py --list
+  docker exec spark-cdc /opt/spark/bin/spark-submit \\
+    --master local[1] \\
+    --jars "/opt/spark/extra-jars/hadoop-aws.jar,/opt/spark/extra-jars/aws-java-sdk-bundle.jar,/opt/spark/extra-jars/deequ.jar" \\
+    /app/test_dq_alert.py --test t2
 
-  # Dry-run (no real PagerDuty delivery, alerts logged only)
-  docker exec spark-cdc /opt/spark/bin/spark-submit ... /app/test_dq_alert.py --test t1 --dry-run
+Tests
+─────────────────────────────────────────────────────────────────────────────
+  t1   Spark Not Running — Infrastructure SEV-1
+         Deletes cdc_last_run_timestamp_seconds from Pushgateway to confirm
+         the simulation is real, then calls alert.send_alert() directly with
+         error_type="spark_not_running" and severity="critical".
+         Alert is NOT resolved — stays open in PagerDuty as an active incident.
 
-Tests:
-  t1   DQ failure        — null PK, duplicate PK, invalid cdc_op, empty table
-  t2   Freshness breach  — fires send_alert() then resolve_alert() for stale_data
-  t3   Spark not running — deletes Pushgateway metric, polls Grafana for firing state
+  t2   SEV-1 DQ Critical — 100% null PK on entire fact table
+         Asserts _dq_severity_scoped routing, then runs run_dq_checks()
+         on an all-null DataFrame.
+         Alert is NOT resolved — stays open in PagerDuty as an active incident.
+
+Why t1 calls alert.send_alert() directly (not via Grafana)
+─────────────────────────────────────────────────────────────────────────────
+  The previous version waited for Grafana Rule 2 to fire, which requires:
+    1. Prometheus to scrape and detect the missing metric (~15s)
+    2. Grafana to evaluate the rule with for:2m (~2 min sustained)
+    3. Grafana to POST to webhook_receiver
+    4. webhook_receiver to produce to northstream.alerts.infrastructure
+    5. kafka_alert_consumer to read and call PagerDuty
+
+  Any failure at step 3, 4, or 5 silently drops the alert — the test passes
+  (Grafana fired) but PagerDuty never receives anything.
+
+  This version cuts straight to alert.send_alert() which is the same HTTP
+  call that would eventually reach PagerDuty anyway. The Pushgateway metric
+  is still deleted to make the simulation authentic, but the alert delivery
+  no longer depends on the Grafana → webhook chain.
+
+  To test the full Grafana → webhook → Kafka → PagerDuty chain separately,
+  monitor webhook-receiver and kafka-alert-consumer logs manually after
+  deleting the metric and waiting ~3 min.
 """
 
 import os
+import re
 import sys
 import time
 import logging
@@ -35,7 +63,7 @@ from prometheus_client import CollectorRegistry, Gauge
 
 sys.path.insert(0, "/app")
 import alert
-from deequ_checks import run_dq_checks
+from deequ_checks import run_dq_checks, _dq_severity_scoped
 
 logging.basicConfig(
     level=logging.INFO,
@@ -57,12 +85,12 @@ GRAFANA_URL             = os.getenv("GRAFANA_URL",              "http://grafana:
 GRAFANA_BASE_URL        = os.getenv("GRAFANA_BASE_URL",         "http://grafana:3000")
 FRESHNESS_THRESHOLD_SEC = int(os.getenv("FRESHNESS_THRESHOLD_SECONDS", "900"))
 
-# ─── Shared schema ─────────────────────────────────────────────────────────────
+# ─── Shared schema ────────────────────────────────────────────────────────────
 ORDER_SCHEMA = StructType([
-    StructField("order_id",   IntegerType(), True),
-    StructField("ship_city",  StringType(),  True),
-    StructField("cdc_op",     StringType(),  True),
-    StructField("cdc_ts_ms",  LongType(),    True),
+    StructField("order_id",  IntegerType(), True),
+    StructField("ship_city", StringType(),  True),
+    StructField("cdc_op",    StringType(),  True),
+    StructField("cdc_ts_ms", LongType(),    True),
 ])
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -76,7 +104,7 @@ def log_ok(msg):    print(f"  {GREEN}[PASS]{RESET}  {msg}")
 def log_fail(msg):  print(f"  {RED}[FAIL]{RESET}  {msg}")
 def log_warn(msg):  print(f"  {YELLOW}[WARN]{RESET}  {msg}")
 
-def assert_result(label: str, actual: bool, expected: bool) -> bool:
+def assert_result(label: str, actual, expected) -> bool:
     ok = actual == expected
     if ok:
         log_ok(f"{label}: got={actual}, expected={expected}")
@@ -88,7 +116,6 @@ def now_ms() -> int:
     return int(datetime.now(timezone.utc).timestamp() * 1000)
 
 def curl(method: str, url: str, data: str = None) -> tuple:
-    """Run a curl command, return (returncode, stdout)."""
     cmd = ["curl", "-sf", "-X", method, url]
     if data:
         cmd += ["--data-binary", data]
@@ -119,198 +146,53 @@ def run_id() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
 
 
-# ─── T1: DQ Failure ───────────────────────────────────────────────────────────
+# ─── T1: Spark Not Running — Infrastructure SEV-1 ────────────────────────────
 def test_t1(dry_run: bool):
     """
-    Runs 4 DQ failure scenarios through run_dq_checks():
-      - Null PK        → send_alert severity=critical
-      - Duplicate PK   → send_alert severity=critical
-      - Invalid cdc_op → send_alert severity=error
-      - Empty table    → send_alert severity=error
-    Also confirms good data passes cleanly (no alert fired).
+    Infrastructure SEV-1 — Spark Not Running.
+
+    Steps:
+      1. Confirm cdc_last_run_timestamp_seconds exists in Pushgateway
+         (proves Spark has run at least once — the simulation is authentic)
+      2. Delete the metric to simulate Spark having stopped
+      3. Confirm the metric is absent
+      4. Call alert.send_alert() directly with:
+           error_type = "spark_not_running"
+           severity   = "critical"
+           group      = "infrastructure"
+         This sends directly to PagerDuty via HTTP — no Grafana dependency.
+      5. The metric is NOT restored — the alert stays open in PagerDuty.
+         Grafana Rule 2 will also fire ~2 min later and produce a second
+         event through the webhook → Kafka chain (visible in consumer logs).
+
+    What you should see in PagerDuty:
+      - New incident: "[CDC Spark SEV-1] Spark processor not running"
+      - Severity: critical
+      - Group: infrastructure
+      - custom_details.sev_label: SEV-1
+      - Incident remains OPEN — resolve manually when done testing
     """
-    section("T1 — DQ Failure")
-    log_info("Tests run_dq_checks() failure paths + PagerDuty send_alert()")
+    section("T1 — Spark Not Running → SEV-1 critical → PagerDuty (stays open)")
+    log_info("Alert sent via alert.send_alert() directly — no Grafana wait")
+    log_info("Metric deleted and NOT restored — incident stays open in PagerDuty")
     if dry_run:
-        log_warn("DRY RUN — no real PagerDuty delivery, alerts logged only")
-
-    spark = make_spark("test-t1-dq")
-    g     = make_dq_gauge()
-    rid   = run_id()
-    table = f"orders_test_{rid}"
-    dashboard_url = f"{GRAFANA_BASE_URL}/d/cdc-pipeline?var-table=orders"
-    all_ok = True
-
-    # Scenario 1: Good data — all checks pass, no alert
-    section("T1 / Scenario 1: Good data — expect ALL PASS, no alert")
-    good_df = spark.createDataFrame([
-        (1, "Hanoi",  "c", now_ms()),
-        (2, "Saigon", "u", now_ms()),
-        (3, "Danang", "r", now_ms()),
-    ], ORDER_SCHEMA)
-    result = run_dq_checks(
-        spark, good_df, table, ["order_id"], g,
-        freshness_threshold_seconds=FRESHNESS_THRESHOLD_SEC,
-        consecutive_failures=0,
-        dashboard_url=dashboard_url,
-    )
-    all_ok &= assert_result("Good data passes", result, True)
-
-    # Scenario 2: Null PK
-    section("T1 / Scenario 2: NULL PK — expect FAIL + critical alert")
-    null_pk_df = spark.createDataFrame([
-        (None, "Alice",   "c", now_ms()),
-        (2,    "Bob",     "u", now_ms()),
-        (3,    "Charlie", "r", now_ms()),
-    ], ORDER_SCHEMA)
-    result = run_dq_checks(
-        spark, null_pk_df, table, ["order_id"], g,
-        freshness_threshold_seconds=FRESHNESS_THRESHOLD_SEC,
-        consecutive_failures=1,
-        dashboard_url=dashboard_url,
-    )
-    all_ok &= assert_result("NULL PK → False", result, False)
-
-    # Scenario 3: Duplicate PK
-    section("T1 / Scenario 3: Duplicate PK — expect FAIL + critical alert")
-    dup_pk_df = spark.createDataFrame([
-        (1, "Alice",   "c", now_ms()),
-        (1, "Bob",     "u", now_ms()),
-        (3, "Charlie", "r", now_ms()),
-    ], ORDER_SCHEMA)
-    result = run_dq_checks(
-        spark, dup_pk_df, table, ["order_id"], g,
-        freshness_threshold_seconds=FRESHNESS_THRESHOLD_SEC,
-        consecutive_failures=2,
-        dashboard_url=dashboard_url,
-    )
-    all_ok &= assert_result("Duplicate PK → False", result, False)
-
-    # Scenario 4: Invalid cdc_op
-    section("T1 / Scenario 4: Invalid cdc_op ('d') — expect FAIL + error alert")
-    bad_op_df = spark.createDataFrame([
-        (1, "Alice",   "c", now_ms()),
-        (2, "Bob",     "d", now_ms()),
-        (3, "Charlie", "r", now_ms()),
-    ], ORDER_SCHEMA)
-    result = run_dq_checks(
-        spark, bad_op_df, table, ["order_id"], g,
-        freshness_threshold_seconds=FRESHNESS_THRESHOLD_SEC,
-        consecutive_failures=0,
-        dashboard_url=dashboard_url,
-    )
-    all_ok &= assert_result("Invalid cdc_op → False", result, False)
-
-    # Scenario 5: Empty table
-    section("T1 / Scenario 5: Empty table — expect FAIL + error alert")
-    empty_df = spark.createDataFrame([], ORDER_SCHEMA)
-    result = run_dq_checks(
-        spark, empty_df, table, ["order_id"], g,
-        freshness_threshold_seconds=FRESHNESS_THRESHOLD_SEC,
-        consecutive_failures=0,
-        dashboard_url=dashboard_url,
-    )
-    all_ok &= assert_result("Empty table → False", result, False)
-
-    spark.stop()
-    return all_ok
-
-
-# ─── T2: Freshness Breach + Resolve ───────────────────────────────────────────
-def test_t2(dry_run: bool):
-    """
-    Calls send_alert() directly with stale_data to simulate a freshness breach,
-    then calls resolve_alert() to confirm the incident auto-closes.
-    Does not require Spark — purely tests alert.py paths.
-    """
-    section("T2 — Freshness Breach + Resolve")
-    log_info("Directly calls send_alert() then resolve_alert() for stale_data")
-    if dry_run:
-        log_warn("DRY RUN — no real PagerDuty delivery, alerts logged only")
+        log_warn("DRY RUN — metric will be deleted but no PagerDuty delivery")
 
     all_ok = True
-    table  = "orders"
     rid    = run_id()
-    fake_gap_s   = FRESHNESS_THRESHOLD_SEC + 180   # 3 min over threshold
-    fake_gap_min = fake_gap_s / 60
 
-    # Phase 1: Fire breach alert
-    section("T2 / Phase 1: Fire freshness breach alert")
-    log_info(f"Simulating {fake_gap_min:.1f} min stale (threshold: {FRESHNESS_THRESHOLD_SEC / 60:.0f} min)")
-
-    sent = alert.send_alert(
-        summary=f"[CDC Freshness] '{table}' data is {fake_gap_min:.1f} min stale (threshold: {FRESHNESS_THRESHOLD_SEC / 60:.0f} min)",
-        severity="critical",
-        table=table,
-        error_type="stale_data",
-        group="data-quality",
-        component="spark/freshness_check",
-        details={
-            "consecutive_failures":  0,
-            "freshness_gap_seconds": round(fake_gap_s, 1),
-            "threshold_seconds":     FRESHNESS_THRESHOLD_SEC,
-            "dashboard_url":         f"{GRAFANA_BASE_URL}/d/cdc-pipeline?var-table={table}",
-        },
-        dedup_suffix=rid,   # unique suffix so each test run = fresh incident
-    )
-
-    if dry_run:
-        log_warn("Alert not sent (dry-run) — check logs above for payload")
-        all_ok &= assert_result("send_alert() reached alert.py", True, True)
-    else:
-        all_ok &= assert_result("send_alert() returned True", sent, True)
-        if sent:
-            log_ok("PagerDuty incident opened — check your PagerDuty dashboard")
-
-    # Phase 2: Resolve
-    section("T2 / Phase 2: Resolve the breach")
-    log_info("Simulating recovery — freshness gap back below threshold")
-    time.sleep(2)   # small pause so PagerDuty registers the trigger first
-
-    resolved = alert.resolve_alert(
-        table=table,
-        error_type="stale_data",
-        dedup_suffix=rid,   # must match the trigger dedup_suffix
-    )
-
-    if dry_run:
-        log_warn("Resolve not sent (dry-run) — check logs above")
-        all_ok &= assert_result("resolve_alert() reached alert.py", True, True)
-    else:
-        all_ok &= assert_result("resolve_alert() returned True", resolved, True)
-        if resolved:
-            log_ok("PagerDuty incident resolved — verify it closed in your dashboard")
-
-    return all_ok
-
-
-# ─── T3: Spark Not Running (Grafana Rule 2) ────────────────────────────────────
-def test_t3(dry_run: bool):
-    """
-    Deletes cdc_last_run_timestamp_seconds from Pushgateway to simulate
-    Spark death, then polls Grafana alerts API until Rule 2 fires.
-    Restores by pushing the metric back.
-    Does not require Spark.
-    """
-    section("T3 — Spark Not Running (Grafana Rule 2)")
-    log_info("Deletes metric from Pushgateway, polls Grafana for firing state")
-    if dry_run:
-        log_warn("DRY RUN — metric will be deleted but Grafana polling skipped")
-
-    all_ok = True
-
-    # Phase 1: Confirm baseline
-    section("T3 / Phase 1: Baseline — confirm metric exists")
+    # ── Phase 1: Confirm metric baseline ─────────────────────────────────
+    section("T1 / Phase 1: Confirm cdc_last_run_timestamp_seconds exists")
     rc, out = curl("GET", f"{PUSHGATEWAY_URL}/metrics")
     if "cdc_last_run_timestamp_seconds" in out:
-        log_ok("cdc_last_run_timestamp_seconds found in Pushgateway")
+        log_ok("Metric found in Pushgateway — simulation is authentic")
     else:
         log_fail("Metric not found — run spark-cdc at least once first:")
         log_fail("  docker compose run --rm spark-cdc")
         return False
 
-    # Phase 2: Delete metric
-    section("T3 / Phase 2: Delete metric to simulate Spark death")
+    # ── Phase 2: Delete metric to simulate Spark stopped ─────────────────
+    section("T1 / Phase 2: Delete metric — simulating Spark has stopped")
     rc, _ = curl("DELETE", f"{PUSHGATEWAY_URL}/metrics/job/cdc_processor")
     if rc == 0:
         log_ok("Metric deleted from Pushgateway")
@@ -320,77 +202,197 @@ def test_t3(dry_run: bool):
 
     rc, out = curl("GET", f"{PUSHGATEWAY_URL}/metrics")
     if "cdc_last_run_timestamp_seconds" not in out:
-        log_ok("Metric confirmed absent")
+        log_ok("Metric confirmed absent — Spark appears stopped to the monitoring stack")
     else:
         log_fail("Metric still present after DELETE")
         return False
 
-    if dry_run:
-        log_warn("DRY RUN — skipping Grafana poll. Restoring metric now.")
-        rc, _ = curl(
-            "POST",
-            f"{PUSHGATEWAY_URL}/metrics/job/cdc_processor",
-            f"# TYPE cdc_last_run_timestamp_seconds gauge\ncdc_last_run_timestamp_seconds {int(time.time())}\n",
-        )
-        log_ok("Metric restored (dry-run)")
-        return True
+    # ── Phase 3: Fire SEV-1 alert via alert.send_alert() ─────────────────
+    section("T1 / Phase 3: Fire SEV-1 critical alert to PagerDuty")
+    log_info("error_type=spark_not_running | severity=critical | group=infrastructure")
+    log_info("dedup_key: cdc-spark-spark_not_running")
 
-    # Phase 3: Poll Grafana for firing state
-    section("T3 / Phase 3: Poll Grafana — waiting for Rule 2 to fire")
-    log_info("Prometheus scrapes every 15s + Grafana rule has for: 2m → allow up to 3 min")
-    log_info(f"Monitor at: {GRAFANA_URL}/alerting/list")
-
-    fired   = False
-    elapsed = 0
-    timeout = 180
-
-    while elapsed < timeout:
-        rc, response = curl("GET", f"{GRAFANA_URL}/api/prometheus/grafana/api/v1/rules")
-        if "firing" in response:
-            fired = True
-            break
-        # Extract state for display
-        import re
-        states = re.findall(r'"state":"([^"]+)"', response)
-        state  = states[0] if states else "unknown"
-        log_info(f"Current state: {state} ({elapsed}s elapsed, waiting for 'firing')")
-        time.sleep(15)
-        elapsed += 15
-
-    all_ok &= assert_result("Grafana Rule 2 fired", fired, True)
-
-    # Phase 4: Restore metric
-    section("T3 / Phase 4: Restore metric")
-    rc, _ = curl(
-        "POST",
-        f"{PUSHGATEWAY_URL}/metrics/job/cdc_processor",
-        f"# TYPE cdc_last_run_timestamp_seconds gauge\ncdc_last_run_timestamp_seconds {int(time.time())}\n",
+    sent = alert.send_alert(
+        summary=(
+            "[CDC Spark SEV-1] Spark processor not running — "
+            "no metrics received, bronze writes stopped. "
+            "Entire pipeline halted."
+        ),
+        severity="critical",
+        table="spark",
+        error_type="spark_not_running",
+        group="infrastructure",
+        component="spark/cdc-processor",
+        details={
+            "sev_label":          "SEV-1",
+            "tta_minutes":        15,
+            "ttr_hours":          2,
+            "protocol":           "Continuous phone+SMS, auto-escalate to Tech Lead after 10 min",
+            "metric_deleted":     "cdc_last_run_timestamp_seconds",
+            "pushgateway_url":    PUSHGATEWAY_URL,
+            "dashboard_url":      f"{GRAFANA_BASE_URL}/d/cdc-pipeline?viewPanel=4",
+            "remediation_steps": [
+                "docker ps | grep spark-cdc",
+                "docker logs spark-cdc --tail 100",
+                "docker compose restart spark-cdc",
+            ],
+        },
+        dedup_suffix=rid,   # unique per run so each test creates a fresh incident
     )
-    if rc == 0:
-        log_ok("Metric restored to Pushgateway")
-    else:
-        log_warn("Failed to restore metric — run spark-cdc manually to push it back")
 
-    log_info(f"Verify PagerDuty: incident should show component=spark, group=infrastructure")
+    if dry_run:
+        log_warn("Alert not sent (dry-run) — payload logged above")
+        all_ok &= assert_result("send_alert() reached alert.py (dry-run)", True, True)
+    else:
+        all_ok &= assert_result("send_alert() returned True (SEV-1 critical)", sent, True)
+        if sent:
+            log_ok("PagerDuty SEV-1 incident OPENED")
+            log_info("")
+            log_info("Check PagerDuty — you should see a new SEV-1 critical incident:")
+            log_info("  Title: [CDC Spark SEV-1] Spark processor not running")
+            log_info("  Severity: critical | Group: infrastructure")
+            log_info("  custom_details.sev_label: SEV-1")
+            log_info("")
+            log_info("The incident is intentionally left OPEN.")
+            log_info("Resolve it manually in PagerDuty when done testing.")
+            log_info("")
+            log_info("Side effect: Grafana Rule 2 will also fire ~2 min from now.")
+            log_info("Watch: docker logs webhook-receiver --tail 10")
+            log_info("Watch: docker logs kafka-alert-consumer --tail 10")
+            log_info("Those logs confirm the Grafana → webhook → Kafka path also works.")
+
+    return all_ok
+
+
+# ─── T2: SEV-1 DQ Critical — 100% null PK ────────────────────────────────────
+def test_t2(dry_run: bool):
+    """
+    Data Quality SEV-1 — 100% null PK on entire fact table.
+
+    Classification: "Null PK violation affects the entire fact table.
+                     The entire Trino query result is untrustworthy."
+
+    Steps:
+      0. Assert _dq_severity_scoped routing:
+           (null_pk, 5/5 rows) → ("critical", "SEV-1")
+           (null_pk, 2/5 rows) → ("error",    "SEV-2")  [boundary]
+      1. Build a 5-row DataFrame where every row has null order_id
+      2. Run run_dq_checks() — Deequ detects violation
+         → _dq_severity_scoped returns ("critical", "SEV-1")
+         → alert.send_alert() calls PagerDuty directly
+      3. Incident is NOT resolved — stays open in PagerDuty.
+
+    What you should see in PagerDuty:
+      - New incident: "[CDC DQ SEV-1] 'orders_fact': null_pk:order_id FAILED"
+      - Severity: critical
+      - Group: data-quality
+      - custom_details.sev_label: SEV-1
+      - Incident remains OPEN — resolve manually when done testing
+    """
+    section("T2 — SEV-1 DQ Critical: 100% null PK → PagerDuty (stays open)")
+    log_info("Alert path: run_dq_checks() → _dq_severity_scoped → alert.send_alert() → PagerDuty")
+    log_info("scope ratio = 100% >= 50% threshold → SEV-1 critical")
+    log_info("Incident intentionally left OPEN — resolve manually in PagerDuty")
+    if dry_run:
+        log_warn("DRY RUN — no real PagerDuty delivery, alerts logged only")
+
+    spark  = make_spark("test-t2-sev1-null-pk")
+    g      = make_dq_gauge()
+    table  = "orders_fact"
+    dashboard_url = f"{GRAFANA_BASE_URL}/d/cdc-pipeline?var-table={table}"
+    all_ok = True
+
+    # ── Phase 0: Assert severity routing ─────────────────────────────────
+    section("T2 / Phase 0: Assert _dq_severity_scoped routing")
+
+    actual_sev_100, actual_label_100 = _dq_severity_scoped("null_pk", 5, 5)
+    all_ok &= assert_result(
+        "null_pk 5/5 rows (100%) → severity",
+        actual_sev_100, "critical",
+    )
+    all_ok &= assert_result(
+        "null_pk 5/5 rows (100%) → sev_label",
+        actual_label_100, "SEV-1",
+    )
+
+    actual_sev_40, actual_label_40 = _dq_severity_scoped("null_pk", 2, 5)
+    all_ok &= assert_result(
+        "null_pk 2/5 rows (40%) → severity (boundary: below 50% = SEV-2)",
+        actual_sev_40, "error",
+    )
+    all_ok &= assert_result(
+        "null_pk 2/5 rows (40%) → sev_label",
+        actual_label_40, "SEV-2",
+    )
+
+    # ── Phase 1: Build fully-null-PK DataFrame ────────────────────────────
+    section("T2 / Phase 1: Build DataFrame — all 5 rows with null order_id")
+
+    full_null_pk_df = spark.createDataFrame([
+        (None, "Hanoi",  "c", now_ms()),
+        (None, "Saigon", "u", now_ms()),
+        (None, "Danang", "r", now_ms()),
+        (None, "Hue",    "c", now_ms()),
+        (None, "CanTho", "u", now_ms()),
+    ], ORDER_SCHEMA)
+
+    total_rows   = full_null_pk_df.count()
+    null_pk_rows = full_null_pk_df.filter("order_id IS NULL").count()
+    null_pct     = (null_pk_rows / total_rows) * 100 if total_rows > 0 else 0
+
+    log_info(f"DataFrame: total={total_rows}, null_pk={null_pk_rows}, pct={null_pct:.1f}%")
+    all_ok &= assert_result("All rows have null PK (100%)", null_pk_rows == total_rows, True)
+
+    # ── Phase 2: Run run_dq_checks() → fires SEV-1 critical ──────────────
+    section("T2 / Phase 2: Run run_dq_checks() — SEV-1 critical sent to PagerDuty")
+    log_info("Deequ detects 100% null PK → _dq_severity_scoped → critical")
+    log_info("alert.send_alert() calls PagerDuty API directly (stable dedup_key)")
+    log_info(f"Stable dedup_key: cdc-{table}-null_pk")
+
+    dq_result = run_dq_checks(
+        spark, full_null_pk_df, table, ["order_id"], g,
+        freshness_threshold_seconds=FRESHNESS_THRESHOLD_SEC,
+        consecutive_failures=4,
+        dashboard_url=dashboard_url,
+    )
+    all_ok &= assert_result("run_dq_checks() fails on 100% null PK", dq_result, False)
+
+    if not dry_run:
+        log_info("")
+        log_info("Check PagerDuty — you should see a new SEV-1 critical incident:")
+        log_info(f"  Title: [CDC DQ SEV-1] '{table}': null_pk:order_id FAILED")
+        log_info(f"  Severity: critical | Group: data-quality")
+        log_info(f"  custom_details.sev_label: SEV-1")
+        log_info("")
+        log_info("The incident is intentionally left OPEN.")
+        log_info("Resolve it manually in PagerDuty when done testing.")
+
+    # ── No resolve phase ──────────────────────────────────────────────────
+    section("T2 / Note: No resolve — incident stays open in PagerDuty")
+    log_info("This is intentional. The alert represents a real data integrity failure.")
+    log_info("Acknowledge and resolve it manually in PagerDuty after verifying.")
+
+    spark.stop()
     return all_ok
 
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
 TESTS = {
-    "t1": ("DQ failure — null PK, dup PK, invalid op, empty table",   test_t1),
-    "t2": ("Freshness breach + resolve — send_alert then resolve_alert", test_t2),
-    "t3": ("Spark not running — delete Pushgateway metric, poll Grafana", test_t3),
+    "t1": ("Spark not running — SEV-1 critical → PagerDuty via alert.send_alert() (stays open)", test_t1),
+    "t2": ("SEV-1 DQ Critical — 100% null PK → alert.py → PagerDuty (stays open)",              test_t2),
 }
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="CDC Pipeline Alert Test Suite",
+        description="CDC Pipeline Alert Test Suite — t1 and t2",
         formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument(
         "--test", "-t",
         choices=list(TESTS.keys()),
-        help="Test to run: t1, t2, or t3",
+        required=True,
+        help="Test to run: t1 or t2",
     )
     parser.add_argument(
         "--dry-run",
@@ -407,28 +409,24 @@ def parse_args():
 
 def main():
     args = parse_args()
-
     pagerduty_configured = bool(alert.PAGERDUTY_ROUTING_KEY)
 
     if args.list:
         print(f"\n{BOLD}Available tests:{RESET}")
         for key, (desc, _) in TESTS.items():
             print(f"  {CYAN}{key}{RESET}  {desc}")
-        print(f"\n{BOLD}PagerDuty:{RESET} {'✓ configured' if pagerduty_configured else '✗ not set (use --dry-run)'}")
+        print(f"\n{BOLD}PagerDuty:{RESET} {'✓ configured — live delivery' if pagerduty_configured else '✗ not set — dry-run mode'}")
         print()
         sys.exit(0)
 
-    if not args.test:
-        print(f"{RED}Error: --test is required. Use --list to see available tests.{RESET}")
-        sys.exit(1)
-
     dry_run = args.dry_run or not pagerduty_configured
     if not pagerduty_configured and not args.dry_run:
-        print(f"\n{YELLOW}[WARN]  PAGERDUTY_ROUTING_KEY not set — running in dry-run mode automatically{RESET}")
+        print(f"\n{YELLOW}[WARN]  PAGERDUTY_ROUTING_KEY not set — dry-run mode activated{RESET}")
+        print(f"{YELLOW}        Set the key in .env and restart services for live delivery{RESET}")
 
     rid = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     print(f"\n{BOLD}Test:{RESET}    {args.test} — {TESTS[args.test][0]}")
-    print(f"{BOLD}Mode:{RESET}    {'dry-run (no real PagerDuty delivery)' if dry_run else 'live (real PagerDuty delivery)'}")
+    print(f"{BOLD}Mode:{RESET}    {'dry-run (no real PagerDuty delivery)' if dry_run else 'LIVE (real PagerDuty delivery)'}")
     print(f"{BOLD}Run ID:{RESET}  {rid}")
 
     _, fn = TESTS[args.test]

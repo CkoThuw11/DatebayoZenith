@@ -1,4 +1,26 @@
 apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: Kafka Alert Router
+    receivers:
+      - uid: webhook-kafka-router
+        type: webhook
+        settings:
+          url: "http://webhook-receiver:5001/alert"
+          httpMethod: POST
+        disableResolveMessage: false
+
+policies:
+  - orgId: 1
+    receiver: Kafka Alert Router
+    group_by:
+      - alertname
+      - table
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h
+
 groups:
     - orgId: 1
       name: 1-minute-checks
@@ -419,7 +441,7 @@ groups:
                   3. If connector is FAILED, restart it:
                      curl -X POST http://localhost:8083/connectors/minio-s3-sink-connector/restart
             runbook_url: http://localhost:3000/d/cdc-pipeline?viewPanel=2
-            summary: '[CDC Kafka] S3 Sink consumer lag is {{ $values.B.Value | humanize }} messages (threshold: 1000) — bronze writes are stalling'
+            summary: '[CDC Kafka] S3 Sink consumer lag is {{ if $values.B.Value }}{{ $values.B.Value | humanize }}{{ else }}N/A{{ end }} messages (threshold: 1000) — bronze writes are stalling'
           labels:
             component: kafka
             group: data-engineering
@@ -490,7 +512,7 @@ groups:
                 component: spark/cdc-processor
                 container: spark-cdc
 
-                silence_duration: {{ $values.B.Value | humanizeDuration }}
+                silence_duration: {{ if $values.B.Value }}{{ $values.B.Value | humanizeDuration }}{{ else }}N/A{{ end }}
                 threshold: 10 minutes
                 metric: cdc_last_run_timestamp_seconds (no update received)
 
@@ -505,7 +527,7 @@ groups:
                   4. If restarted, verify metrics resume within 2 minutes:
                      curl -s pushgateway:9091/metrics | grep cdc_last_run
             runbook_url: http://localhost:3000/d/cdc-pipeline?viewPanel=4
-            summary: '[CDC Spark] Processor has not run for {{ $values.B.Value | humanizeDuration }} (threshold: 10 min) — bronze writes are stopped'
+            summary: '[CDC Spark] Processor has not run for {{ if $values.B.Value }}{{ $values.B.Value | humanizeDuration }}{{ else }}N/A{{ end }} (threshold: 10 min) — bronze writes are stopped'
           labels:
             component: spark
             group: infrastructure
@@ -576,7 +598,7 @@ groups:
                 component: spark/freshness_check
                 table: {{ $labels.table }}
 
-                freshness_gap: {{ $values.B.Value | humanizeDuration }}
+                freshness_gap: {{ if $values.B.Value }}{{ $values.B.Value | humanizeDuration }}{{ else }}N/A{{ end }}
                 threshold: 15 minutes (900 seconds)
 
                 dashboard_url: "http://localhost:3000/d/cdc-pipeline?var-table={{ $labels.table }}"
@@ -589,10 +611,91 @@ groups:
                     docker logs spark-cdc --tail 100
                   4. If DQ is blocking writes, inspect quarantine data and fix upstream source.
             runbook_url: http://localhost:3000/d/cdc-pipeline
-            summary: '[CDC Freshness] Table {{ $labels.table }} is {{ $values.B.Value | humanizeDuration }} stale (SLA: 15 min)'
+            summary: '[CDC Freshness] Table {{ $labels.table }} is {{ if $values.B.Value }}{{ $values.B.Value | humanizeDuration }}{{ else }}N/A{{ end }} stale (SLA: 15 min)'
           labels:
             component: spark
             group: data-quality
             pipeline: northwind-cdc
             severity: critical
+          isPaused: false
+        - uid: cdc-kafka-broker-down-alert
+          title: CDC Kafka Broker Unreachable
+          condition: C
+          data:
+            - refId: A
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: prometheus-ds
+              model:
+                expr: absent(kafka_brokers) or kafka_brokers < 1
+                instant: true
+                intervalMs: 1000
+                maxDataPoints: 43200
+                refId: A
+            - refId: B
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                expression: A
+                hide: false
+                intervalMs: 1000
+                maxDataPoints: 43200
+                reducer: max
+                refId: B
+                type: reduce
+            - refId: C
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                conditions:
+                    - evaluator:
+                        params:
+                            - 0
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - C
+                      reducer:
+                        params: []
+                        type: last
+                      type: query
+                expression: B
+                hide: false
+                intervalMs: 1000
+                maxDataPoints: 43200
+                refId: C
+                type: threshold
+          dashboardUid: ""
+          panelId: 0
+          noDataState: Alerting
+          execErrState: Alerting
+          for: 1m
+          annotations:
+            summary: "[CDC Kafka] Broker unreachable — all consumer groups disconnected (SEV-1)"
+            description: |
+                component: kafka/broker
+                error_type: kafka_broker_down
+
+                dashboard_url: "http://localhost:3000/d/cdc-pipeline"
+                steps: |
+                  1. Check if kafka container is still running:
+                     docker ps | grep kafka
+                  2. Check kafka container logs:
+                     docker logs kafka --tail 100
+                  3. Restart if crashed:
+                     docker compose restart kafka
+                  4. Verify kafka-exporter reconnects:
+                     docker logs kafka-exporter --tail 50
+          labels:
+            severity: critical
+            component: kafka
+            group: infrastructure
+            pipeline: northwind-cdc
           isPaused: false

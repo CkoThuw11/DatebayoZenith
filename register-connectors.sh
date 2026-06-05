@@ -27,7 +27,8 @@ until curl -sf http://localhost:8081/subjects > /dev/null 2>&1; do
 done
 echo " Schema Registry is ready!"
 
-# ─── 4. Wait for Kafka Connect ───────────────────────────────────────────────
+# ─── 4a. Wait for Kafka Connect ───────────────────────────────────────────────
+
 echo ""
 echo "Waiting for Kafka Connect to be ready..."
 until [[ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8083/connectors)" == "200" ]]; do
@@ -35,6 +36,11 @@ until [[ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8083/connect
     sleep 5
 done
 echo " Kafka Connect is ready!"
+
+# ─── 4b. Create Kafka alert topics ───────────────────────────────────────────
+echo ""
+echo "Creating Kafka alert topics..."
+bash create-alert-topics.sh
 
 # ─── 5. Register Debezium — source first ─────────────────────────────────────
 echo ""
