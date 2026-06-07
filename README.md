@@ -320,6 +320,7 @@ MinIO bronze bucket
 <p align="center">
   Trino CLI Query
 </p>
+
 # 🙏 Acknowledgements
 
 We would like to sincerely thank our mentor for the guidance, support, and valuable feedback throughout the development of this project.
